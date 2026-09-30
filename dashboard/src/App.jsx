@@ -78,7 +78,7 @@ function ControlStrip({ snapshot }) {
 
 export default function App() {
   const route = useHashRoute();
-  const { snapshot, connection, sample } = useSnapshot();
+  const { snapshot, connection } = useSnapshot();
 
   return (
     <>
@@ -99,7 +99,6 @@ export default function App() {
         </div>
       </header>
       <ControlStrip snapshot={snapshot} />
-      {sample && <p className="page sample-note">Sample data (?sample=1): not connected to a running network.</p>}
       <main>
         {route === "#/" && (
           <>

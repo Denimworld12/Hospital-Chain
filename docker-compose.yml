@@ -79,6 +79,8 @@ services:
     environment:
       DATABASE_URL: postgresql://medchain:medchain@postgres:5432/medchain
       HEARTBEAT_STALE_S: "7"
+      # must match shared_secret in config/hospital-*.yaml
+      MEDCHAIN_SHARED_SECRET: medchain-demo-secret
     depends_on:
       postgres:
         condition: service_healthy

@@ -37,6 +37,10 @@ and hospitals A and C keep training. `docker start hospital-b` brings it back.
 - **Honest accounting**: payload bytes are the exact HTTP body sizes (the weight
   array; headers not counted). The baseline does not quantize, so "actually
   sent" equals "full precision would cost" until Q-GADMM lands.
+- **Shared secret**: `/update` and `/round/*` require the `X-MedChain-Secret`
+  header to match `shared_secret` in the node config (one demo value for all
+  nodes; the dashboard gets it via `MEDCHAIN_SHARED_SECRET`), otherwise 401.
+  `/health`, `/status` and `/metrics` stay open.
 - **Observer dashboard**: it never coordinates training. Its buttons relay a
   single start/pause request to one node, which floods it to the others; killing
   the dashboard does not affect a run (tested).
@@ -65,6 +69,3 @@ MEDCHAIN_STACK=1 pytest tests/integration -v        # real runs, real docker kil
 
 CI (`.github/workflows/ci.yml`) runs the unit tests, the dashboard build, and
 the docker build plus the live-stack integration tests.
-
-Dashboard design review without a stack: `cd dashboard && npm install && npx vite`,
-then open `/?sample=1`.

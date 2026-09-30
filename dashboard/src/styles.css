@@ -288,15 +288,8 @@ a {
   background: var(--color-burnt-orange);
 }
 
-.live--live::before,
-.live--sample::before {
+.live--live::before {
   background: var(--color-mint-sage);
-}
-
-.sample-note {
-  font-size: var(--text-body-sm);
-  color: var(--color-burnt-orange);
-  margin-top: var(--spacing-12);
 }
 
 .footer {

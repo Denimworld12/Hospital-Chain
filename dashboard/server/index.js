@@ -14,6 +14,7 @@ import { buildSnapshot, STALE_AFTER_S } from "./snapshot.js";
 const PORT = Number(process.env.PORT || 8080);
 const DIST = process.env.DASHBOARD_DIST || fileURLToPath(new URL("../dist", import.meta.url));
 const TICK_MS = Number(process.env.SNAPSHOT_INTERVAL_MS || 1000);
+const SHARED_SECRET = process.env.MEDCHAIN_SHARED_SECRET || "";
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
 pool.on("error", (err) => console.warn("postgres pool error:", err.message));
@@ -55,7 +56,7 @@ async function relay(action, body) {
     try {
       const resp = await fetch(`${node.url}/round/${action}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-MedChain-Secret": SHARED_SECRET },
         body: JSON.stringify(action === "start" ? { rounds: body.rounds, initiated_by: "dashboard" } : {}),
         signal: AbortSignal.timeout(8000),
       });

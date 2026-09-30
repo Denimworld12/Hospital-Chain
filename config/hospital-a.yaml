@@ -10,6 +10,10 @@ neighbours:
   - id: hospital-b
     url: http://hospital-b:8002
 
+# Pre-shared secret every peer (and the dashboard relay) sends in the
+# X-MedChain-Secret header on /update and /round/*. Same value on all nodes.
+shared_secret: medchain-demo-secret
+
 # Only this hospital's own slice is mounted into its container.
 data_slice: /data/hospital-a.csv
 

@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from . import wire
@@ -99,10 +99,18 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
     def runner() -> Runner:
         return state["runner"]
 
+    def require_secret(request: Request) -> None:
+        given = request.headers.get(wire.H_SECRET, "")
+        if not secrets.compare_digest(given.encode(), cfg.shared_secret.encode()):
+            raise HTTPException(401, detail="missing or invalid shared secret")
+
+    peer_only = [Depends(require_secret)]
+
     async def flood(path: str, payload: dict, exclude: str | None) -> dict[str, str]:
         async def one(n):
             try:
-                resp = await runner().client.post(f"{n.url}{path}", json=payload)
+                resp = await runner().client.post(f"{n.url}{path}", json=payload,
+                                                  headers={wire.H_SECRET: cfg.shared_secret})
                 return n.id, str(resp.json().get("status", resp.status_code))
             except (httpx.HTTPError, ValueError) as exc:
                 return n.id, f"unreachable ({type(exc).__name__})"
@@ -140,7 +148,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         return {"node_id": cfg.node_id, "engine": engine.label, "run_id": r.run_id, "run_state": r.state,
                 "total_rounds": r.total_rounds, "history": [asdict(m) for m in r.history]}
 
-    @app.post("/round/start")
+    @app.post("/round/start", dependencies=peer_only)
     async def round_start(req: StartRequest):
         r = runner()
         run_id = req.run_id or new_run_id()
@@ -167,15 +175,15 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         return {"status": ("paused" if action == "pause" else "running") if changed else r.state,
                 "node_id": cfg.node_id, "run_id": r.run_id, "forwarded": forwarded}
 
-    @app.post("/round/pause")
+    @app.post("/round/pause", dependencies=peer_only)
     async def round_pause(req: ControlRequest | None = None):
         return await control("pause", req or ControlRequest())
 
-    @app.post("/round/resume")
+    @app.post("/round/resume", dependencies=peer_only)
     async def round_resume(req: ControlRequest | None = None):
         return await control("resume", req or ControlRequest())
 
-    @app.post("/update")
+    @app.post("/update", dependencies=peer_only)
     async def update(request: Request):
         h = request.headers
         sender = h.get(wire.H_SENDER)
