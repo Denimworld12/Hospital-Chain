@@ -215,6 +215,7 @@ a {
   display: flex;
   gap: var(--spacing-32);
   flex-wrap: wrap;
+  margin-left: auto;
 }
 
 .nav__item {
@@ -617,6 +618,12 @@ a {
   letter-spacing: var(--mc-eyebrow-tracking);
   text-transform: uppercase;
   margin: 0 0 var(--spacing-16);
+}
+
+.comm-counter__failed {
+  font-size: var(--text-body-sm);
+  color: var(--color-burnt-orange);
+  margin: 0 0 var(--spacing-12);
 }
 
 .comm-counter__total {
