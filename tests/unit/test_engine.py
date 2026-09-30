@@ -7,7 +7,9 @@ import pytest
 
 from node import wire
 from node.engine import Engine, NeighborUpdate
-from node.gossip import LABEL, GossipBaselineEngine, build_engine
+from node.config import load_config
+from node.engines import build_engine
+from node.gossip import LABEL, GossipBaselineEngine
 from node.trainer import N_PARAMS, LocalTrainer
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,17 +30,48 @@ def test_slices_are_real_uci_non_iid_splits():
         assert len(trainer(node).y_train) + len(trainer(node).y_test) == n
 
 
-def test_engine_implements_the_swappable_interface():
-    eng = build_engine("gossip-baseline", trainer(), bits=64, rho=1.0)
+def node_config(tmp_path, engine, bits=2, extra=""):
+    p = tmp_path / "n.yaml"
+    p.write_text(
+        f"""node_id: hospital-a
+port: 1
+data_slice: {SLICES / 'hospital-a.csv'}
+shared_secret: s
+engine: {engine}
+bits: {bits}
+chain: [hospital-a, hospital-b]
+neighbours:
+  - id: hospital-b
+    url: http://b:2
+{extra}"""
+    )
+    return load_config(p)
+
+
+@pytest.mark.parametrize("engine,label", [
+    ("gossip", "naive gossip baseline"),
+    ("gossip-baseline", "naive gossip baseline"),
+    ("qgadmm", "Q-GADMM (b=2)"),
+    ("gadmm_fp", "GADMM full precision (float32 deltas)"),
+])
+def test_every_engine_implements_the_swappable_interface(tmp_path, engine, label):
+    eng = build_engine(node_config(tmp_path, engine), trainer())
     assert isinstance(eng, Engine)
-    for method in ("train_round", "package_update", "apply_neighbor_update"):
+    for method in ("train_round", "package_update", "apply_neighbor_update", "evaluate", "reset"):
         assert callable(getattr(eng, method))
-    assert eng.label == LABEL == "naive gossip baseline"
+    assert eng.label == label
 
 
-def test_unknown_engine_and_quantized_bits_are_refused():
-    with pytest.raises(ValueError):
-        build_engine("q-gadmm", trainer(), bits=64, rho=1.0)
+def test_gossip_ignores_the_admm_bits_setting(tmp_path):
+    eng = build_engine(node_config(tmp_path, "gossip", bits=2), trainer())
+    assert eng.label == LABEL == "naive gossip baseline" and eng.bits == 64 and eng.dtype == "float64"
+
+
+def test_unknown_engine_and_unsupported_bits_are_refused(tmp_path):
+    with pytest.raises(ValueError, match="unknown engine"):
+        node_config(tmp_path, "q-gadmm")
+    with pytest.raises(ValueError, match="bits"):
+        build_engine(node_config(tmp_path, "qgadmm", bits=3), trainer())
     with pytest.raises(ValueError, match="float64"):
         GossipBaselineEngine(trainer(), bits=8)
 

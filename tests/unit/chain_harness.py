@@ -58,7 +58,8 @@ def free_ports(n: int) -> list[int]:
 
 
 def write_configs(tmp: Path, chain: list[str], *, engine: str = "qgadmm", bits: int = 2, rho: float = 24.0,
-                  local_epochs: int = 50, round_timeout_s: float = 2.0, checkpoint_every: int = 5,
+                  local_epochs: int = 50, round_timeout_s: float = 2.0, round_pause_s: float = 0.0,
+                  checkpoint_every: int = 5, rounds: int = 300,
                   slices: dict[str, str] | None = None) -> dict[str, Path]:
     ports = dict(zip(chain, free_ports(len(chain))))
     slices = slices or {n: f"hospital-{'abc'[i % 3]}" for i, n in enumerate(chain)}
@@ -81,8 +82,8 @@ bits: {bits}
 local_epochs: {local_epochs}
 checkpoint_every: {checkpoint_every}
 checkpoint_dir: {tmp / "ckpt"}
-training: {{rounds: 300}}
-timing: {{heartbeat_interval_s: 5, round_timeout_s: {round_timeout_s}, round_pause_s: 0}}
+training: {{rounds: {rounds}}}
+timing: {{heartbeat_interval_s: 5, round_timeout_s: {round_timeout_s}, round_pause_s: {round_pause_s}}}
 """
         )
         out[node] = p
@@ -119,7 +120,9 @@ class NodeServer:
             time.sleep(0.02)
         return self
 
-    def stop(self) -> None:
+    def stop(self, *, abrupt: bool = False) -> None:
+        """Shut the node down; abrupt=True drops in-flight connections instead of draining them (a kill)."""
+        self.server.force_exit = abrupt
         self.server.should_exit = True
         self.thread.join(timeout=20)
 

@@ -50,6 +50,8 @@ def new_run_id() -> str:
 
 
 class Runner:
+    INBOX_ROUNDS = 64  # rounds of neighbour updates kept buffered
+
     def __init__(self, cfg: NodeConfig, engine: Engine, db: DbWriter, client: httpx.AsyncClient):
         self.cfg = cfg
         self.engine = engine
@@ -85,8 +87,9 @@ class Runner:
         async with self._cond:
             self._inbox.setdefault((run_id, update.round), {})[update.sender] = update
             # keep the buffer bounded: drop stale rounds / other runs
-            if len(self._inbox) > 64:
-                for key in sorted(self._inbox, key=lambda k: (k[0] != self.run_id, k[1]))[: len(self._inbox) - 64]:
+            if len(self._inbox) > self.INBOX_ROUNDS:
+                excess = len(self._inbox) - self.INBOX_ROUNDS
+                for key in sorted(self._inbox, key=lambda k: (k[0] != self.run_id, k[1]))[:excess]:
                     self._inbox.pop(key, None)
             on_time = self._on_time(run_id, update)
             self._cond.notify_all()

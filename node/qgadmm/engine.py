@@ -225,6 +225,8 @@ class QGADMMEngine(Engine):
                     duplicate.append(u.sender)
                     continue
                 if u.base and have != u.base:
+                    log.warning("packet seq %s from %s does not apply to my mirror (mirror seq %s)", u.seq, u.sender,
+                                self.state.mirror_seq[u.sender])
                     resync.append(u.sender)
                     continue
                 pkt = quantizer.decode(u.body, self.d)

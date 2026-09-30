@@ -165,6 +165,10 @@ def simulate(engines: Sequence, rounds: int, *, epsilon: float = 1e-3, stop_on_c
 class ChainRoundScheduler(Runner):
     """Round loop for a Q-GADMM / GADMM node: head/tail phases over HTTP, checkpoints, rejoin."""
 
+    # A lagging neighbour's pending packets are still needed (each builds on the last), so keep far more
+    # than the gossip baseline does; a packet that is dropped anyway is recovered by a snapshot resync.
+    INBOX_ROUNDS = 1024
+
     def __init__(self, cfg, engine: "qengine.QGADMMEngine", db, client: httpx.AsyncClient, *, checkpoint_path):
         super().__init__(cfg, engine, db, client)
         self.pos = engine.pos

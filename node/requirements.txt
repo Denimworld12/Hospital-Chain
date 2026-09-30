@@ -1,3 +1,5 @@
+# CPU-only PyTorch wheels (the default Linux wheel pulls in ~2 GB of CUDA libraries)
+--extra-index-url https://download.pytorch.org/whl/cpu
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1
@@ -5,3 +7,4 @@ numpy==2.2.1
 scikit-learn==1.6.0
 psycopg[binary]==3.2.3
 PyYAML==6.0.2
+torch==2.5.1
