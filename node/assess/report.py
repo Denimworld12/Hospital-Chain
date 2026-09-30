@@ -74,7 +74,7 @@ class _Report(FPDF):
         self.ln(3)
         self.set_font("Helvetica", "B", 11)
         self.set_text_color(*INDIGO)
-        self.cell(0, 7, title.upper(), new_x="LMARGIN", new_y="NEXT")
+        self.cell(0, 7, title.upper(), new_x="LMARGIN", new_y="NEXT", align="L")
         self.set_draw_color(*INK)
         self.set_line_width(0.2)
         self.line(15, self.get_y(), 195, self.get_y())
@@ -86,7 +86,7 @@ class _Report(FPDF):
         self.set_font("Helvetica", "", 10)
         self.cell(62, 7, f"  {key}", fill=True)
         self.set_font("Helvetica", "B", 10)
-        self.multi_cell(0, 7, value, fill=True, new_x="LMARGIN", new_y="NEXT")
+        self.multi_cell(0, 7, value, fill=True, new_x="LMARGIN", new_y="NEXT", align="L")
 
     def rows(self, pairs: list[tuple[str, str]]) -> None:
         for i, (k, v) in enumerate(pairs):
@@ -108,23 +108,23 @@ class _Report(FPDF):
             self.line(x + w * marker / 100, y + 0.8, x + w * marker / 100, y + 6.7)
         self.set_xy(x + w + 3, y)
         self.set_font("Helvetica", "B", 9)
-        self.cell(0, 7, f"{pct:.1f}%", new_x="LMARGIN", new_y="NEXT")
+        self.cell(0, 7, f"{pct:.1f}%", new_x="LMARGIN", new_y="NEXT", align="L")
 
     def bullets(self, items: list[str], empty: str = "None identified") -> None:
         self.set_font("Helvetica", "", 10)
         for item in items or [empty]:
             self.set_x(18)
-            self.multi_cell(0, 6, f"-  {item}", new_x="LMARGIN", new_y="NEXT")
+            self.multi_cell(0, 6, f"-  {item}", new_x="LMARGIN", new_y="NEXT", align="L")
 
     def footer_block(self, provenance: list[str]) -> None:
         self.section("About the model")
         self.set_font("Helvetica", "", 8.5)
         for line in provenance:
-            self.multi_cell(0, 5, line, new_x="LMARGIN", new_y="NEXT")
+            self.multi_cell(0, 5, line, new_x="LMARGIN", new_y="NEXT", align="L")
         self.ln(3)
         self.set_fill_color(*CREAM)
         self.set_font("Helvetica", "I", 8.5)
-        self.multi_cell(0, 5, f"Disclaimer: {DISCLAIMER}", fill=True, new_x="LMARGIN", new_y="NEXT")
+        self.multi_cell(0, 5, f"Disclaimer: {DISCLAIMER}", fill=True, new_x="LMARGIN", new_y="NEXT", align="L")
 
     def bytes(self) -> bytes:
         return bytes(self.output())
@@ -166,12 +166,12 @@ def tabular_report(hospital: str, patient: dict, result: dict, model: dict) -> b
     pdf.bar("XGBoost (calibrated)", result["xgb_confidence"], INDIGO)
     pdf.bar("Blended (0.4 RF + 0.6 XGB)", result["confidence"], TIER_COLOURS[tier], marker=marker)
     pdf.set_font("Helvetica", "I", 8)
-    pdf.cell(0, 5, "  The black tick marks the decision threshold.", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 5, "  The black tick marks the decision threshold.", new_x="LMARGIN", new_y="NEXT", align="L")
 
     pdf.section("4. Risk factors")
     for name, key in (("Critical", "critical_factors"), ("Moderate", "moderate_factors"), ("Lifestyle", "lifestyle_factors")):
         pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(0, 6, name, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 6, name, new_x="LMARGIN", new_y="NEXT", align="L")
         pdf.bullets(result[key])
 
     pdf.section("5. Recommendations")
