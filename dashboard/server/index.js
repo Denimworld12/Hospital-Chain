@@ -2,7 +2,9 @@
 // Postgres over a WebSocket (plus one "update" event per logged /update send),
 // and relays the two buttons (start / pause) to a
 // hospital node as a one-shot request. Training is coordinated peer-to-peer by
-// the nodes; killing this process does not affect it.
+// the nodes; killing this process does not affect it. It also relays risk
+// assessment requests to the hospital node the user picks (inference only; the
+// patient inputs pass straight through and are not stored).
 
 import http from "node:http";
 import fs from "node:fs";
@@ -72,6 +74,46 @@ async function relay(action, body) {
   return last;
 }
 
+const MAX_ASSESS_BYTES = 16 * 1024 * 1024;
+
+async function readBody(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_ASSESS_BYTES) return null;
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+// Relay one risk assessment to the chosen alive node (or the first alive one).
+async function relayAssess(req, res, subpath, wanted) {
+  const body = await readBody(req);
+  if (body === null) return send(res, 413, { detail: "Upload too large (16 MB max)." });
+  const { rows } = await pool.query(
+    `SELECT node_id, url FROM nodes WHERE last_heartbeat > now() - make_interval(secs => $1) ORDER BY node_id`,
+    [STALE_AFTER_S],
+  );
+  const node = wanted ? rows.find((n) => n.node_id === wanted) : rows[0];
+  if (!node) return send(res, 503, { detail: wanted ? `${wanted} is not alive.` : "No hospital node is alive." });
+  try {
+    const resp = await fetch(`${node.url}/assess${subpath}`, {
+      method: "POST",
+      headers: { "Content-Type": req.headers["content-type"] || "application/json", "X-MedChain-Secret": SHARED_SECRET },
+      body,
+      signal: AbortSignal.timeout(30000),
+    });
+    const headers = { "Content-Type": resp.headers.get("content-type") || "application/json", "Cache-Control": "no-store" };
+    const disposition = resp.headers.get("content-disposition");
+    if (disposition) headers["Content-Disposition"] = disposition;
+    res.writeHead(resp.status, headers);
+    return res.end(Buffer.from(await resp.arrayBuffer()));
+  } catch (err) {
+    return send(res, 502, { detail: `${node.node_id} unreachable: ${err.message}` });
+  }
+}
+
 function serveStatic(req, res) {
   const url = new URL(req.url, "http://x");
   let file = path.normalize(path.join(DIST, decodeURIComponent(url.pathname)));
@@ -94,6 +136,9 @@ const server = http.createServer(async (req, res) => {
       const out = await relay(m[1], { rounds });
       return send(res, out.status, out.body);
     }
+    const url = new URL(req.url, "http://x");
+    const a = url.pathname.match(/^\/api\/assess(\/pdf|\/ecg|\/ecg\/pdf)?$/);
+    if (a && req.method === "POST") return relayAssess(req, res, a[1] || "", url.searchParams.get("node"));
     if (req.url.startsWith("/api/")) return send(res, 404, { detail: "not found" });
     return serveStatic(req, res);
   } catch (err) {

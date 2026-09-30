@@ -6,6 +6,7 @@ import { EngineChip, PillButton, WaveDivider } from "./components/ui.jsx";
 import TrainingMonitor from "./pages/TrainingMonitor.jsx";
 import Communication from "./pages/Communication.jsx";
 import AuditLog from "./pages/AuditLog.jsx";
+import Assessment from "./pages/Assessment.jsx";
 import { control, useSnapshot } from "./useSnapshot.js";
 
 const ROUTES = [
@@ -13,6 +14,7 @@ const ROUTES = [
   { hash: "#/training", label: "Training monitor" },
   { hash: "#/communication", label: "Communication" },
   { hash: "#/audit", label: "Audit log" },
+  { hash: "#/assessment", label: "Risk assessment" },
 ];
 
 function useHashRoute() {
@@ -111,10 +113,12 @@ export default function App() {
         {route === "#/training" && <TrainingMonitor snapshot={snapshot} />}
         {route === "#/communication" && <Communication snapshot={snapshot} />}
         {route === "#/audit" && <AuditLog snapshot={snapshot} />}
+        {route === "#/assessment" && <Assessment snapshot={snapshot} />}
       </main>
       <footer className="footer">
         <div className="page">
-          The dashboard only observes: it reads Postgres and the WebSocket and never coordinates training.
+          The dashboard only observes training: it reads Postgres and the WebSocket and never coordinates it.
+          Risk assessments are relayed to one hospital node and not stored.
         </div>
       </footer>
     </>
