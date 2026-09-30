@@ -1,4 +1,4 @@
-import { ResidualChart } from "./Charts.jsx";
+import { MetricChart, ResidualChart } from "./Charts.jsx";
 import { Eyebrow, Pill, engineInfo } from "./ui.jsx";
 
 const sci = (v) => (v == null ? "-" : Number(v).toExponential(2));
@@ -33,6 +33,32 @@ export default function ConsensusPanel({ snapshot }) {
             residuals. Run engine: qgadmm or gadmm_fp to see neighbours converge here.
           </p>
         )}
+      </div>
+    </div>
+  );
+}
+
+const loss = (v) => (v == null ? "-" : Number(v).toFixed(3));
+
+// The objective the hospitals minimise together. A single hospital's held-out loss can rise while
+// this falls: consensus trades a little local fit (on non-IID data) for one shared model.
+export function NetworkLoss({ snapshot }) {
+  const series = snapshot?.network_loss || [];
+  const total = snapshot?.run?.total_rounds || 20;
+  const last = series[series.length - 1];
+  return (
+    <div className="consensus" data-testid="network-loss">
+      <Eyebrow>Loss across the network</Eyebrow>
+      <div className="card consensus__card">
+        <div className="consensus__head">
+          <h3 className="consensus__title">Network training loss</h3>
+          <span className="consensus__meta">{last ? `round ${last.round}: ${loss(last.loss)}` : "no rounds yet"}</span>
+        </div>
+        <p className="consensus__meta">
+          Mean training log-loss over all hospitals' own patients, each at its own model, weighted by patients.
+          One hospital's held-out loss can rise while this falls: agreeing on one model costs a little local fit.
+        </p>
+        <MetricChart data={series} dataKey="loss" title="" totalRounds={total} domain={["auto", "auto"]} format={loss} />
       </div>
     </div>
   );

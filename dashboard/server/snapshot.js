@@ -30,6 +30,7 @@ export async function buildSnapshot(pool) {
   const run = runRes.rows[0] || null;
 
   const metrics = {};
+  let networkLoss = [];
   let consensus = { edges: [], series: [], epsilon: null, latest_max: null, reached: false, converged_round: null };
   let comm = {
     round: 0, bytes_this_round: 0, full_precision_bytes_this_round: 0, ref32_bytes_this_round: 0,
@@ -38,14 +39,20 @@ export async function buildSnapshot(pool) {
   };
   if (run) {
     const m = await pool.query(
-      `SELECT node_id, round, loss, accuracy, train_loss, residuals FROM metrics WHERE run_id = $1 ORDER BY node_id, round`,
+      `SELECT node_id, round, loss, accuracy, train_loss, n_train, residuals FROM metrics WHERE run_id = $1 ORDER BY node_id, round`,
       [run.run_id],
     );
     // Per-edge primal residuals (ADMM engines only). Both ends of an edge log the same value;
     // keep the larger if they ever differ.
     const byRound = new Map();
     const edgeSet = new Set();
+    const lossByRound = new Map(); // round -> {sum, n, nodes}
     for (const row of m.rows) {
+      const l = lossByRound.get(row.round) || { sum: 0, n: 0, nodes: 0 };
+      l.sum += row.train_loss * row.n_train;
+      l.n += row.n_train;
+      l.nodes += 1;
+      lossByRound.set(row.round, l);
       (metrics[row.node_id] ||= []).push({ round: row.round, loss: row.loss, accuracy: row.accuracy, train_loss: row.train_loss });
       const edges = row.residuals?.edges;
       if (!edges) continue;
@@ -57,6 +64,13 @@ export async function buildSnapshot(pool) {
       }
       byRound.set(row.round, point);
     }
+    // Network training loss: every hospital's mean training log-loss at its own model, weighted by its
+    // training rows - the objective the nodes minimise together. Only rounds every registered node logged.
+    const expectedNodes = nodes.length;
+    networkLoss = [...lossByRound.entries()]
+      .filter(([, l]) => l.nodes >= expectedNodes)
+      .sort((a, b) => a[0] - b[0])
+      .map(([round, l]) => ({ round, loss: l.sum / l.n }));
     if (edgeSet.size) {
       const edges = [...edgeSet].sort();
       const series = [...byRound.values()].sort((a, b) => a.round - b.round);
@@ -128,6 +142,7 @@ export async function buildSnapshot(pool) {
     nodes,
     run: run ? { ...run, state: runState(run, nodes) } : null,
     metrics,
+    network_loss: networkLoss,
     consensus,
     comm,
     audit: auditRes.rows,

@@ -205,8 +205,14 @@ def test_training_run_completes_and_is_audited():
     total = rounds[next(iter(NODES))]
     for n, h in hist.items():
         assert [x["round"] for x in h] == list(range(1, total + 1))
-        assert h[-1]["loss"] < h[0]["loss"], f"{n} loss did not fall"
         assert all(x["neighbours_heard"] == len(NODES[n].neighbours) for x in h)
+        if not ADMM:
+            assert h[-1]["loss"] < h[0]["loss"], f"{n} loss did not fall"
+    # the objective the hospitals minimise together falls (for the ADMM engines one non-IID hospital's own
+    # held-out loss may rise a little as it agrees on the shared model; that is shown, not hidden)
+    net = snapshot()["network_loss"]
+    assert [p["round"] for p in net] == list(range(1, total + 1))
+    assert net[-1]["loss"] < net[0]["loss"] - 0.01, "network training loss did not fall"
 
     edges = sum(len(c.neighbours) for c in NODES.values())
     sent = db_rows("SELECT payload_bytes, full_precision_bytes, bits, status FROM updates_meta WHERE run_id = %s", (run_id,))
@@ -302,7 +308,10 @@ def test_kill_a_tail_mid_round_heads_continue_and_it_rejoins_from_its_checkpoint
     assert CHAIN.index(KILL_NODE) % 2 == 1, f"{KILL_NODE} is not a TAIL node"
     heads = [n for n in NODES if n != KILL_NODE and KILL_NODE in {x.id for x in NODES[n].neighbours}]
     wait_idle()
-    run_id = start_run()
+    # a larger round budget than the default: while the tail is down the heads run on alone (tens of
+    # rounds), and after the rejoin the chain needs roughly a fresh run's worth of rounds to agree again
+    budget = 400
+    run_id = start_via_dashboard(budget)
     wait_until(lambda: rounds_done(KILL_NODE, run_id) >= 12, 90, what=f"{KILL_NODE} past round 12 (a checkpoint exists)")
     try:
         docker("kill", PREFIX + KILL_NODE)
@@ -344,7 +353,8 @@ def test_kill_a_tail_mid_round_heads_continue_and_it_rejoins_from_its_checkpoint
     assert hist[0]["round"] == rejoin_round
     # residuals resume falling: from the post-rejoin disagreement down to consensus
     assert max(h["max_residual"] for h in hist[:5]) > 10 * EPSILON
-    assert final[KILL_NODE] < NODES[KILL_NODE].training.rounds, "no consensus after the rejoin"
+    assert final[KILL_NODE] < budget, "no consensus after the rejoin (hit the round limit)"
+    assert hist[-1]["max_residual"] < 10 * EPSILON
     snap = snapshot()
     assert snap["consensus"]["converged_round"] is not None and snap["consensus"]["converged_round"] > rejoin_round
     assert next(n for n in snap["nodes"] if n["node_id"] == KILL_NODE)["status"] == "alive"

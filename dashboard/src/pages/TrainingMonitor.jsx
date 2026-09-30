@@ -1,6 +1,6 @@
 import microscope from "@assets/microscope.svg";
 import { MetricChart } from "../components/Charts.jsx";
-import ConsensusPanel from "../components/Consensus.jsx";
+import ConsensusPanel, { NetworkLoss } from "../components/Consensus.jsx";
 import { Eyebrow, Illustration, SectionHeading, StatusDot } from "../components/ui.jsx";
 
 const pct = (v) => `${Math.round(v * 100)}%`;
@@ -18,6 +18,7 @@ export default function TrainingMonitor({ snapshot }) {
           tagline="each hospital learns on its own patients"
         />
         <ConsensusPanel snapshot={snapshot} />
+        <NetworkLoss snapshot={snapshot} />
         <div className="card-grid">
           {nodes.map((n) => {
             const series = snapshot?.metrics?.[n.node_id] || [];
