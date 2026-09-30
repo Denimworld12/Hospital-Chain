@@ -92,14 +92,23 @@ photos, no external images. Preview: `assets/preview.html`.
   the wavy vertical divider between them.
 - **Network topology (home)**: three line-art hospitals joined by a chain, a
   honey-gold blob behind the centre of the cluster, a status dot per node.
-- **Training monitor**: one white card per hospital with loss and accuracy line
-  charts (indigo lines, honey-gold dots).
+- **Training monitor**: a consensus panel (eyebrow "DISAGREEMENT BETWEEN
+  NEIGHBOURS": the primal residual per chain edge vs round, indigo lines told apart
+  by dash pattern, a mint-sage "CONSENSUS REACHED" pill once every edge is below
+  epsilon), then one white card per hospital with loss and accuracy line charts
+  (indigo lines, honey-gold dots).
 - **Communication**: bytes-sent-this-round as the 88px display number, plus a
-  bar pair: "full precision would cost" (indigo) vs "actually sent" (gold).
+  bar pair: "32-bit would cost" (indigo) vs "we sent" (gold), and the engine chip
+  (GOSSIP / GADMM FP / Q-GADMM b=2/4/8; the running engine is filled indigo).
+- **Topology**: a small line-art envelope flies along a chain edge for each
+  `/update` (WebSocket event).
 - **Audit log**: the journal table.
 
 ## Honest copy
 
-The current engine is a **naive gossip baseline** (neighbour weight averaging).
-Wherever the UI or logs name the engine, it says exactly that. Byte counts are
-the real payload sizes the nodes put on the wire.
+The engine is named exactly as it is everywhere the UI or logs name it:
+"Q-GADMM (b=2)", "GADMM full precision (float32 deltas)" or "naive gossip
+baseline". Byte counts are the real payload sizes the nodes put on the wire; the
+32-bit reference is computed from the actual parameter count, and at this model
+size the per-packet saving is stated as measured (5.3x at b=2), with the
+coordinate-only figure labelled as such.

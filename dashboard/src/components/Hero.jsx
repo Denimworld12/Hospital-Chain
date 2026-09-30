@@ -17,7 +17,7 @@ export default function Hero({ engine }) {
         <p className="script hero__tagline">learning together, data stays home</p>
         <p className="hero__body">
           Three hospitals train one heart-disease model together. Patient records never leave the
-          building: only model weight arrays travel between neighbouring nodes.
+          building: only model updates travel between neighbouring nodes.
         </p>
         <p className="tag">Engine: {engine}</p>
       </div>

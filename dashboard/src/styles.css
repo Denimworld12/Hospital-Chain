@@ -450,6 +450,10 @@ a {
   stroke-linejoin: round;
 }
 
+.topo__envelope--flying rect {
+  fill: var(--color-cream-paper); /* occludes the link line under the glyph; still a line-art envelope */
+}
+
 .topo__dot {
   stroke: var(--color-pure-white);
   stroke-width: 3;
@@ -595,6 +599,101 @@ a {
 }
 
 /* ---- Communication ----------------------------------------------------- */
+
+/* ---- Engine chip / status pill -------------------------------------------- */
+
+.engine-chip {
+  display: inline-flex;
+  flex-wrap: wrap;
+  border: var(--mc-hairline);
+  border-radius: var(--radius-tags);
+  overflow: hidden;
+  background: var(--color-pure-white);
+}
+
+.engine-chip__opt {
+  font-family: var(--font-label);
+  font-size: var(--text-caption);
+  letter-spacing: var(--mc-nav-tracking);
+  text-transform: uppercase;
+  color: var(--color-deep-indigo);
+  padding: 2px var(--spacing-12);
+  opacity: 0.45;
+}
+
+.engine-chip__opt + .engine-chip__opt {
+  border-left: var(--mc-hairline);
+}
+
+.engine-chip__opt--on {
+  background: var(--color-deep-indigo);
+  color: var(--color-pure-white);
+  opacity: 1;
+}
+
+.status-pill {
+  display: inline-block;
+  font-family: var(--font-label);
+  font-size: var(--text-caption);
+  letter-spacing: var(--mc-eyebrow-tracking);
+  text-transform: uppercase;
+  color: var(--color-ink-black);
+  border-radius: var(--radius-tags);
+  padding: 4px var(--spacing-16);
+}
+
+.status-pill--sage {
+  background: var(--color-mint-sage);
+}
+
+/* ---- Consensus panel ------------------------------------------------------- */
+
+.consensus {
+  position: relative;
+  z-index: 1;
+  margin-bottom: var(--spacing-40);
+}
+
+.consensus__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-12);
+  flex-wrap: wrap;
+}
+
+.consensus__title {
+  font-family: var(--font-label);
+  font-size: var(--text-caption);
+  letter-spacing: var(--mc-eyebrow-tracking);
+  text-transform: uppercase;
+  font-weight: 500;
+  color: var(--color-deep-indigo);
+  margin: 0;
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+}
+
+.consensus__meta {
+  font-size: var(--text-body-sm);
+  margin: var(--spacing-8) 0 var(--spacing-12);
+}
+
+.residual-chart {
+  height: 280px;
+}
+
+.comm-engine {
+  position: relative;
+  z-index: 1;
+  margin: calc(-1 * var(--spacing-16)) 0 var(--spacing-24);
+}
+
+.comm-ratio {
+  font-size: var(--text-body-sm);
+  margin: var(--spacing-12) 0 0;
+}
 
 .comm-grid {
   position: relative;

@@ -56,7 +56,7 @@
 
   --mc-chart-line: var(--color-deep-indigo);
   --mc-chart-dot: var(--color-honey-gold);
-  --mc-bar-full: var(--color-deep-indigo);   /* "full precision would cost" */
+  --mc-bar-full: var(--color-deep-indigo);   /* "32-bit would cost" */
   --mc-bar-sent: var(--color-honey-gold);    /* "actually sent" */
 
   --mc-card-shadow: var(--shadow-xl-2);

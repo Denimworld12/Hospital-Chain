@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import favicon from "@assets/favicon.svg";
 import Hero from "./components/Hero.jsx";
 import Topology from "./components/Topology.jsx";
-import { PillButton, WaveDivider } from "./components/ui.jsx";
+import { EngineChip, PillButton, WaveDivider } from "./components/ui.jsx";
 import TrainingMonitor from "./pages/TrainingMonitor.jsx";
 import Communication from "./pages/Communication.jsx";
 import AuditLog from "./pages/AuditLog.jsx";
@@ -38,7 +38,8 @@ function ControlStrip({ snapshot }) {
     setBusy(true);
     setMessage("");
     try {
-      const res = await control(action, action === "start" ? { rounds: 20 } : {});
+      // no round count: each node runs its configured training.rounds (config/*.yaml)
+      const res = await control(action);
       if (!res.ok) setMessage(res.detail || res.error || "The nodes refused the request.");
     } catch {
       setMessage("Could not reach the dashboard server.");
@@ -51,7 +52,7 @@ function ControlStrip({ snapshot }) {
     <div className="control-strip">
       <div className="page control-strip__inner">
         <div className="control-strip__status">
-          <span className="tag">Engine: {snapshot?.engine || "naive gossip baseline"}</span>
+          <EngineChip label={snapshot?.engine || "naive gossip baseline"} />
           <span className="control-strip__run" data-testid="run-state">
             {run ? `${run.run_id} / ${state}` : "No training run yet"}
           </span>

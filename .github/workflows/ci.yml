@@ -7,7 +7,7 @@ on:
 
 jobs:
   pytest-unit:
-    name: pytest (unit)
+    name: pytest (unit + in-process chain) and compare_engines smoke run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,9 +15,15 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: |
+            requirements-dev.txt
+            node/requirements.txt
       - run: pip install -r requirements-dev.txt
+      # quantizer unbiasedness, round-trip determinism, boundary nodes, convergence sanity,
+      # the networked chain over real HTTP (incl. kill + rejoin), and gossip parity
       - run: pytest tests/unit -v
+      - name: experiments/compare_engines.py (headless, all three engines)
+        run: python experiments/compare_engines.py --out /tmp/compare-out --no-sweep
 
   dashboard-build:
     name: dashboard build
@@ -36,16 +42,26 @@ jobs:
       - run: npm run build
 
   docker-stack:
-    name: docker build + pytest (live stack, kill tests)
+    name: docker build + pytest (live stack, kill tests) - engine ${{ matrix.engine }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [qgadmm, gadmm_fp, gossip]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: |
+            requirements-dev.txt
+            node/requirements.txt
       - run: pip install -r requirements-dev.txt
+      - name: select engine ${{ matrix.engine }} in every node config
+        run: |
+          sed -i 's/^engine: .*/engine: ${{ matrix.engine }}/' config/hospital-*.yaml
+          grep -H '^engine:' config/hospital-*.yaml
       - name: docker build
         run: docker compose build
       - name: docker compose up

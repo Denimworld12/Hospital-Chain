@@ -86,3 +86,40 @@ export function Blob({ color = "gold", className = "", style }) {
     </svg>
   );
 }
+
+// Engines are chosen in config (`engine:` in config/*.yaml); the chip only shows which one is running.
+export function engineInfo(label = "") {
+  const q = label.match(/^Q-GADMM \(b=(\d+)\)/);
+  if (q) return { key: `qgadmm-${q[1]}`, family: "qgadmm", bits: Number(q[1]) };
+  if (/^GADMM full precision/.test(label)) return { key: "gadmm_fp", family: "gadmm_fp", bits: 32 };
+  return { key: "gossip", family: "gossip", bits: 64 };
+}
+
+const ENGINE_CHIPS = [
+  ["gossip", "Gossip"],
+  ["gadmm_fp", "GADMM FP"],
+  ["qgadmm-2", "Q-GADMM b=2"],
+  ["qgadmm-4", "b=4"],
+  ["qgadmm-8", "b=8"],
+];
+
+export function EngineChip({ label }) {
+  const active = engineInfo(label).key;
+  return (
+    <span className="engine-chip" role="status" aria-label={`Engine: ${label}`} title="Set by `engine:` and `bits:` in config/*.yaml" data-testid="engine-chip" data-engine={active}>
+      {ENGINE_CHIPS.map(([key, text]) => (
+        <span key={key} className={`engine-chip__opt${key === active ? " engine-chip__opt--on" : ""}`}>
+          {text}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+export function Pill({ children, className = "", ...props }) {
+  return (
+    <span className={`status-pill ${className}`} {...props}>
+      {children}
+    </span>
+  );
+}

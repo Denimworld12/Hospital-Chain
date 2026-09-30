@@ -4,7 +4,9 @@ import hospitalSm from "@assets/hospital-building-sm.svg";
 import blobGold from "@assets/blob-gold.svg";
 import stethoscope from "@assets/stethoscope.svg";
 import ecg from "@assets/ecg-wave.svg";
+import { useEffect, useRef, useState } from "react";
 import { Illustration, SectionHeading, StatusDot } from "./ui.jsx";
+import { subscribeUpdates } from "../useSnapshot.js";
 
 const W = 1000;
 const H = 470;
@@ -39,13 +41,72 @@ function edges(placed) {
   return out;
 }
 
-function Envelope({ x, y, rot }) {
+function Envelope({ x, y, rot, flying = false }) {
   return (
-    <g transform={`translate(${x} ${y}) rotate(${rot})`} className="topo__envelope">
+    <g transform={`translate(${x} ${y}) rotate(${rot})`} className={`topo__envelope${flying ? " topo__envelope--flying" : ""}`}
+      data-testid={flying ? "envelope-in-flight" : undefined}>
       <rect x="-11" y="-7.5" width="22" height="15" rx="1" />
       <path d="M-11 -7.5 L0 1.5 L11 -7.5" />
     </g>
   );
+}
+
+const FLIGHT_MS = 700;
+const linkKey = (a, b) => [a, b].sort().join("|");
+
+// Geometry of one chain link: a quadratic curve from the left node's roof to the right node's.
+function linkGeometry(a, b) {
+  const [l, r] = a.x < b.x ? [a, b] : [b, a];
+  const p0 = [l.x + l.size * 0.46, l.y - l.size * 0.3];
+  const p2 = [r.x - r.size * 0.46, r.y - r.size * 0.3];
+  const p1 = [(p0[0] + p2[0]) / 2, Math.min(p0[1], p2[1]) - 60];
+  return { left: l.node_id, right: r.node_id, p0, p1, p2 };
+}
+
+function pointAt({ p0, p1, p2 }, t) {
+  const u = 1 - t;
+  const x = u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0];
+  const y = u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1];
+  const dx = 2 * u * (p1[0] - p0[0]) + 2 * t * (p2[0] - p1[0]);
+  const dy = 2 * u * (p1[1] - p0[1]) + 2 * t * (p2[1] - p1[1]);
+  return { x, y, rot: (Math.atan2(dy, dx) * 180) / Math.PI };
+}
+
+// One envelope per delivered /update (a WebSocket "update" event), flying sender -> receiver.
+function useFlights() {
+  const [flights, setFlights] = useState([]);
+  const [now, setNow] = useState(() => performance.now());
+  const frame = useRef(0);
+  useEffect(
+    () =>
+      subscribeUpdates((rows) => {
+        const t = performance.now();
+        setFlights((cur) => {
+          const next = cur.filter((f) => t - f.start < FLIGHT_MS);
+          for (const row of rows) {
+            if (row.status !== "delivered") continue;
+            const key = linkKey(row.sender, row.receiver);
+            // at most one envelope per direction in flight, so a busy run stays legible
+            if (next.some((f) => f.key === key && f.from === row.sender)) continue;
+            next.push({ id: row.id, key, from: row.sender, start: t, bytes: row.payload_bytes });
+          }
+          return next;
+        });
+      }),
+    [],
+  );
+  useEffect(() => {
+    if (!flights.length) return undefined;
+    const step = () => {
+      const t = performance.now();
+      setNow(t);
+      if (flights.some((f) => t - f.start < FLIGHT_MS)) frame.current = requestAnimationFrame(step);
+      else setFlights([]);
+    };
+    frame.current = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame.current);
+  }, [flights]);
+  return { flights, now };
 }
 
 export default function Topology({ snapshot }) {
@@ -54,6 +115,7 @@ export default function Topology({ snapshot }) {
   const links = edges(placed);
   const centre = placed[Math.floor(placed.length / 2)];
   const alive = nodes.filter((n) => n.status === "alive").length;
+  const { flights, now } = useFlights();
 
   return (
     <section className="topology section section--white" id="topology">
@@ -72,19 +134,21 @@ export default function Topology({ snapshot }) {
             )}
             {links.map(([a, b]) => {
               const down = a.status !== "alive" || b.status !== "alive";
-              const [l, r] = a.x < b.x ? [a, b] : [b, a];
-              const x1 = l.x + l.size * 0.46;
-              const y1 = l.y - l.size * 0.3;
-              const x2 = r.x - r.size * 0.46;
-              const y2 = r.y - r.size * 0.3;
-              const cx = (x1 + x2) / 2;
-              const cy = Math.min(y1, y2) - 60;
-              const ex = 0.25 * x1 + 0.5 * cx + 0.25 * x2;
-              const ey = 0.25 * y1 + 0.5 * cy + 0.25 * y2;
+              const g = linkGeometry(a, b);
+              const key = linkKey(a.node_id, b.node_id);
+              const inFlight = flights.filter((f) => f.key === key && now - f.start < FLIGHT_MS);
               return (
-                <g key={`${a.node_id}-${b.node_id}`} className={`topo__link${down ? " topo__link--down" : ""}`}>
-                  <path d={`M${x1} ${y1} Q${cx} ${cy} ${x2} ${y2}`} />
-                  {!down && <Envelope x={ex} y={ey - 14} rot={y2 > y1 ? 8 : -8} />}
+                <g key={key} className={`topo__link${down ? " topo__link--down" : ""}`} data-link={key}>
+                  <path d={`M${g.p0[0]} ${g.p0[1]} Q${g.p1[0]} ${g.p1[1]} ${g.p2[0]} ${g.p2[1]}`} />
+                  {inFlight.map((f) => {
+                    const t = Math.min(1, Math.max(0, (now - f.start) / FLIGHT_MS));
+                    const pt = pointAt(g, f.from === g.left ? t : 1 - t);
+                    return <Envelope key={f.id} x={pt.x} y={pt.y - 12} rot={pt.rot > 90 || pt.rot < -90 ? pt.rot + 180 : pt.rot} flying />;
+                  })}
+                  {!down && !inFlight.length && (() => {
+                    const pt = pointAt(g, 0.5);
+                    return <Envelope x={pt.x} y={pt.y - 14} rot={0} />;
+                  })()}
                 </g>
               );
             })}

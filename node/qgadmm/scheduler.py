@@ -449,7 +449,14 @@ class ChainRoundScheduler(Runner):
         """After a container restart: reload the checkpoint and rejoin the run the neighbours are still in."""
         if self.active:
             return "busy"
-        restored = self.engine.restore(self.checkpoint_path)  # synchronously: no /round/start can interleave
+        try:
+            restored = self.engine.restore(self.checkpoint_path)  # synchronously: no /round/start can interleave
+        except Exception as exc:  # noqa: BLE001 - e.g. a checkpoint from a differently sized model
+            log.warning("ignoring unreadable checkpoint %s: %s", self.checkpoint_path, exc)
+            self.engine.reset()
+            self.db.audit(node_id=self.cfg.node_id, event="checkpoint_not_resumed",
+                          detail={"reason": f"unreadable checkpoint: {exc}", "engine": self.engine.label})
+            return "unreadable-checkpoint"
         if not restored:
             return "no-checkpoint"
         st = self.engine.state
@@ -469,6 +476,7 @@ class ChainRoundScheduler(Runner):
         if self.active:
             return "busy"  # a new run started meanwhile
         if not peers:
+            self.engine.reset()
             self.db.audit(node_id=self.cfg.node_id, event="checkpoint_not_resumed", run_id=run_id,
                           round_num=ckpt_round, detail={"reason": "no neighbour is still in this run",
                                                         "engine": self.engine.label})

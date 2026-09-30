@@ -1,10 +1,12 @@
-# MedChain MVP: three hospital nodes + postgres + observer dashboard.
+# MedChain: three hospital nodes + postgres + observer dashboard.
 #
 #   docker compose up --build        then open http://localhost:8080
 #
 # All three nodes run the same image; the mounted YAML config decides identity.
 # Each node mounts ONLY its own data slice - raw patient rows never leave the
-# container that holds them. Only weight arrays travel between nodes.
+# container that holds them. Only model updates travel between nodes. The ADMM
+# engines checkpoint their own model state to a per-node volume, so a killed node
+# rejoins its run on restart.
 
 x-node: &node
   build:
@@ -43,6 +45,7 @@ services:
     volumes:
       - ./config/hospital-a.yaml:/config/hospital-a.yaml:ro
       - ./data/slices/hospital-a.csv:/data/hospital-a.csv:ro
+      - checkpoints-a:/checkpoints
     ports:
       - "8001:8001"
 
@@ -55,6 +58,7 @@ services:
     volumes:
       - ./config/hospital-b.yaml:/config/hospital-b.yaml:ro
       - ./data/slices/hospital-b.csv:/data/hospital-b.csv:ro
+      - checkpoints-b:/checkpoints
     ports:
       - "8002:8002"
 
@@ -67,6 +71,7 @@ services:
     volumes:
       - ./config/hospital-c.yaml:/config/hospital-c.yaml:ro
       - ./data/slices/hospital-c.csv:/data/hospital-c.csv:ro
+      - checkpoints-c:/checkpoints
     ports:
       - "8003:8003"
 
@@ -86,3 +91,8 @@ services:
         condition: service_healthy
     ports:
       - "8080:8080"
+
+volumes:
+  checkpoints-a:
+  checkpoints-b:
+  checkpoints-c:
