@@ -26,7 +26,7 @@ function useHashRoute() {
   return route;
 }
 
-function ControlStrip({ snapshot, connection }) {
+function ControlStrip({ snapshot }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const run = snapshot?.run;
@@ -53,9 +53,8 @@ function ControlStrip({ snapshot, connection }) {
         <div className="control-strip__status">
           <span className="tag">Engine: {snapshot?.engine || "naive gossip baseline"}</span>
           <span className="control-strip__run" data-testid="run-state">
-            {run ? `${run.run_id} / ${state} / round ${round} of ${run.total_rounds}` : "No training run yet"}
+            {run ? `${run.run_id} / ${state}` : "No training run yet"}
           </span>
-          <span className={`live live--${connection}`}>{connection === "live" ? "Live" : connection}</span>
         </div>
         <div className="control-strip__actions">
           <PillButton variant="primary" onClick={() => act("start")} disabled={busy || running} aria-busy={running}>
@@ -96,9 +95,10 @@ export default function App() {
               </a>
             ))}
           </nav>
+          <span className={`live live--${connection}`}>{connection === "live" ? "Live" : connection}</span>
         </div>
       </header>
-      <ControlStrip snapshot={snapshot} connection={connection} />
+      <ControlStrip snapshot={snapshot} />
       {sample && <p className="page sample-note">Sample data (?sample=1): not connected to a running network.</p>}
       <main>
         {route === "#/" && (

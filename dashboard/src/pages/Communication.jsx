@@ -20,6 +20,11 @@ export default function Communication({ snapshot }) {
             <div className="card comm-counter">
               <p className="display-number" data-testid="bytes-this-round">{formatBytes(sent)}</p>
               <p className="comm-counter__unit">bytes across {c.messages_this_round || 0} weight updates</p>
+              {c.failed_this_round > 0 && (
+                <p className="comm-counter__failed">
+                  {c.failed_this_round} send{c.failed_this_round === 1 ? "" : "s"} to unreachable neighbours this round (0 bytes delivered)
+                </p>
+              )}
               <p className="comm-counter__total">
                 Total this run: <strong>{formatBytes(c.total_bytes || 0)}</strong> bytes
               </p>
