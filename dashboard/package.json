@@ -1,0 +1,29 @@
+{
+  "name": "medchain-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MedChain observer dashboard: reads Postgres, pushes snapshots over WebSocket. Never coordinates training.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@fontsource/bebas-neue": "^5.1.1",
+    "@fontsource/caveat": "^5.1.1",
+    "@fontsource/dm-sans": "^5.1.1",
+    "@fontsource/ibm-plex-mono": "^5.1.1",
+    "@fontsource/jost": "^5.1.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "recharts": "^3.10.1",
+    "vite": "^6.0.7"
+  }
+}

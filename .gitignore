@@ -1,0 +1,8 @@
+.claude/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+node_modules/
+dashboard/dist/
+.DS_Store

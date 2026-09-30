@@ -1,0 +1,36 @@
+{
+  "source": "UCI Heart Disease (CC BY 4.0), https://doi.org/10.24432/C52P4X",
+  "features": [
+    "age",
+    "sex",
+    "cp",
+    "trestbps",
+    "chol",
+    "fbs",
+    "restecg",
+    "thalach",
+    "exang",
+    "oldpeak"
+  ],
+  "target": "target",
+  "slices": {
+    "hospital-a": {
+      "file": "hospital-a.csv",
+      "institution": "Cleveland Clinic Foundation",
+      "patients": 303,
+      "positive_rate": 0.459
+    },
+    "hospital-b": {
+      "file": "hospital-b.csv",
+      "institution": "Hungarian Institute of Cardiology, Budapest",
+      "patients": 294,
+      "positive_rate": 0.361
+    },
+    "hospital-c": {
+      "file": "hospital-c.csv",
+      "institution": "V.A. Medical Center, Long Beach",
+      "patients": 200,
+      "positive_rate": 0.745
+    }
+  }
+}

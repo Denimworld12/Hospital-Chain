@@ -1,0 +1,7 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+numpy==2.2.1
+scikit-learn==1.6.0
+psycopg[binary]==3.2.3
+PyYAML==6.0.2

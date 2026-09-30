@@ -1,0 +1,88 @@
+# MedChain MVP: three hospital nodes + postgres + observer dashboard.
+#
+#   docker compose up --build        then open http://localhost:8080
+#
+# All three nodes run the same image; the mounted YAML config decides identity.
+# Each node mounts ONLY its own data slice - raw patient rows never leave the
+# container that holds them. Only weight arrays travel between nodes.
+
+x-node: &node
+  build:
+    context: .
+    dockerfile: node/Dockerfile
+  image: medchain-node:latest
+  environment: &node-env
+    DATABASE_URL: postgresql://medchain:medchain@postgres:5432/medchain
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: "no"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: medchain-postgres
+    environment:
+      POSTGRES_USER: medchain
+      POSTGRES_PASSWORD: medchain
+      POSTGRES_DB: medchain
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medchain -d medchain"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  hospital-a:
+    <<: *node
+    container_name: hospital-a
+    environment:
+      <<: *node-env
+      NODE_CONFIG: /config/hospital-a.yaml
+    volumes:
+      - ./config/hospital-a.yaml:/config/hospital-a.yaml:ro
+      - ./data/slices/hospital-a.csv:/data/hospital-a.csv:ro
+    ports:
+      - "8001:8001"
+
+  hospital-b:
+    <<: *node
+    container_name: hospital-b
+    environment:
+      <<: *node-env
+      NODE_CONFIG: /config/hospital-b.yaml
+    volumes:
+      - ./config/hospital-b.yaml:/config/hospital-b.yaml:ro
+      - ./data/slices/hospital-b.csv:/data/hospital-b.csv:ro
+    ports:
+      - "8002:8002"
+
+  hospital-c:
+    <<: *node
+    container_name: hospital-c
+    environment:
+      <<: *node-env
+      NODE_CONFIG: /config/hospital-c.yaml
+    volumes:
+      - ./config/hospital-c.yaml:/config/hospital-c.yaml:ro
+      - ./data/slices/hospital-c.csv:/data/hospital-c.csv:ro
+    ports:
+      - "8003:8003"
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    image: medchain-dashboard:latest
+    container_name: dashboard
+    environment:
+      DATABASE_URL: postgresql://medchain:medchain@postgres:5432/medchain
+      HEARTBEAT_STALE_S: "7"
+      # must match shared_secret in config/hospital-*.yaml
+      MEDCHAIN_SHARED_SECRET: medchain-demo-secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
