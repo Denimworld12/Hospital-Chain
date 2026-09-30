@@ -107,8 +107,9 @@ async function relayAssess(req, res, subpath, wanted) {
     const headers = { "Content-Type": resp.headers.get("content-type") || "application/json", "Cache-Control": "no-store" };
     const disposition = resp.headers.get("content-disposition");
     if (disposition) headers["Content-Disposition"] = disposition;
+    const data = Buffer.from(await resp.arrayBuffer());
     res.writeHead(resp.status, headers);
-    return res.end(Buffer.from(await resp.arrayBuffer()));
+    return res.end(data);
   } catch (err) {
     return send(res, 502, { detail: `${node.node_id} unreachable: ${err.message}` });
   }
@@ -138,7 +139,7 @@ const server = http.createServer(async (req, res) => {
     }
     const url = new URL(req.url, "http://x");
     const a = url.pathname.match(/^\/api\/assess(\/pdf|\/ecg|\/ecg\/pdf)?$/);
-    if (a && req.method === "POST") return relayAssess(req, res, a[1] || "", url.searchParams.get("node"));
+    if (a && req.method === "POST") return await relayAssess(req, res, a[1] || "", url.searchParams.get("node"));
     if (req.url.startsWith("/api/")) return send(res, 404, { detail: "not found" });
     return serveStatic(req, res);
   } catch (err) {
