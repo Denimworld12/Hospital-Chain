@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import unicodedata
 
 from fpdf import FPDF
 
@@ -130,8 +131,12 @@ class _Report(FPDF):
         return bytes(self.output())
 
 
+def _latin1(text: str) -> str:
+    return unicodedata.normalize("NFKC", text).encode("latin-1", "replace").decode("latin-1")
+
+
 def _stamp(hospital: str) -> str:
-    return f"{hospital}   |   Generated {time.strftime('%d %b %Y, %H:%M UTC', time.gmtime())}"
+    return f"{_latin1(hospital)}   |   Generated {time.strftime('%d %b %Y, %H:%M UTC', time.gmtime())}"
 
 
 def tabular_report(hospital: str, patient: dict, result: dict, model: dict) -> bytes:
@@ -195,7 +200,7 @@ def ecg_report(hospital: str, filename: str, result: dict, model: dict) -> bytes
     pdf.rows([
         ("Classification", result["label"]),
         ("Confidence", f"{result['confidence']:.1f}%"),
-        ("ECG file", filename or "upload"),
+        ("ECG file", _latin1(filename) or "upload"),
     ])
     pdf.section("2. Class probabilities")
     p = result["probabilities"]

@@ -2,7 +2,7 @@
 """Download the Mendeley "ECG Images dataset of Cardiac Patients" for the ECG classifier.
 
 928 12-lead ECG printouts (JPG) from the Ch. Pervaiz Elahi Institute of
-Cardiology, Multan, in four folders. `node/risk/train_ecg.py` maps them to the
+Cardiology, Multan, in four folders. `node/assess/train_ecg.py` maps them to the
 three classes the classifier predicts:
 
     Normal Person ECG Images                          -> normal

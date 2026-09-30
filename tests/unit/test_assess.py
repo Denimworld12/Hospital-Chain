@@ -40,11 +40,11 @@ def tabular_model_path(tmp_path_factory):
     return path
 
 
-def make_client(tmp_path, tabular_model, ecg_model):
+def make_client(tmp_path, tabular_model, ecg_model, display_name="Test Hospital"):
     cfg = tmp_path / "node.yaml"
     cfg.write_text(
         f"""node_id: test-node
-display_name: Test Hospital
+display_name: {display_name}
 port: 18998
 data_slice: {ROOT / 'data/slices/hospital-a.csv'}
 shared_secret: {SECRET}
@@ -148,6 +148,15 @@ def test_ecg_pdf_and_bad_upload(client):
     bad = client.post("/assess/ecg", files={"ecg": ("notes.txt", b"not an image", "text/plain")}, headers=AUTH)
     assert bad.status_code == 422
     assert client.post("/assess/ecg", headers=AUTH).status_code == 422
+
+
+def test_pdfs_accept_non_latin1_names(tmp_path, tabular_model_path):
+    with make_client(tmp_path, tabular_model_path, ECG_MODEL, display_name="एम्स दिल्ली — AIIMS") as c:
+        name = "Screenshot 2026-09-30 at 10.15.02\u202fAM ईसीजी.png"
+        r = c.post("/assess/ecg/pdf", files={"ecg": (name, png(), "image/png")}, headers=AUTH)
+        assert r.status_code == 200 and r.content.startswith(b"%PDF")
+        r = c.post("/assess/pdf", json=AT_RISK, headers=AUTH)
+        assert r.status_code == 200 and r.content.startswith(b"%PDF")
 
 
 def test_risk_tier_thresholds():
