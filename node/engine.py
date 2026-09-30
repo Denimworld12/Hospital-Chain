@@ -36,6 +36,11 @@ class UpdatePackage:
     n_params: int
     bits: int
     full_precision_bytes: int  # what the same parameters cost as float64
+    # ADMM engines only: packet sequence number and fingerprints of the snapshot
+    # the packet was built on / produces (lets the receiver prove its mirror is exact)
+    seq: int | None = None
+    base: str | None = None
+    produces: str | None = None
 
     @property
     def payload_bytes(self) -> int:
@@ -49,6 +54,9 @@ class NeighborUpdate:
     body: bytes
     checksum: str
     dtype: str
+    seq: int | None = None
+    base: str | None = None
+    produces: str | None = None
 
 
 @dataclass(frozen=True)
