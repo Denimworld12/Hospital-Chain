@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MedChain SVG preview</title>
+<link rel="icon" href="svg/favicon.svg">
+<link rel="stylesheet" href="../design/tokens.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Caveat&family=DM+Sans:wght@400;500&family=Jost:wght@400;500&display=swap">
+<style>
+  body { margin: 0; background: var(--color-cream-paper); color: var(--color-ink-black); font-family: var(--font-body); }
+  header { padding: 32px 40px 8px; }
+  h1 { color: var(--color-deep-indigo); font-family: var(--font-display); font-weight: 400; font-size: 56px; letter-spacing: 0.02em; margin: 0; line-height: 0.9; }
+  .tag { color: var(--color-deep-indigo); font-family: var(--font-script); font-size: 28px; margin: 4px 0 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 24px; padding: 24px 40px 40px; }
+  figure { margin: 0; background: var(--color-pure-white); border-radius: var(--radius-cards); box-shadow: var(--shadow-xl-2); padding: 16px; overflow: hidden; }
+  figure.cream { background: var(--color-cream-paper); outline: 1px dashed var(--color-soft-shadow); }
+  figure .art { height: 200px; display: flex; align-items: center; justify-content: center; }
+  figure img { max-width: 100%; max-height: 100%; }
+  figcaption { font-family: var(--font-label); font-size: var(--text-caption); letter-spacing: 0.2em; text-transform: uppercase; margin-top: 12px; }
+  .wide { grid-column: 1 / -1; }
+  .wide .art { height: 120px; }
+  .wide img { width: 100%; height: 100%; }
+  .tilt-l { transform: rotate(-7deg); } .tilt-r { transform: rotate(6deg); }
+  /* hero composition mock */
+  .hero { position: relative; display: grid; grid-template-columns: 1fr 120px 1fr; align-items: center; min-height: 420px; overflow: hidden; margin: 0 40px; }
+  .hero h2 { color: var(--color-deep-indigo); font-family: var(--font-display); font-weight: 400; font-size: 88px; line-height: 0.88; margin: 0; }
+  .hero .divider { position: relative; height: 100%; }
+  .hero .divider img { position: absolute; width: 180px; left: -30px; }
+  .hero .divider .sage { top: 30px; transform: rotate(8deg) scaleY(1.9); }
+  .hero .divider .gold { top: 110px; left: -10px; width: 150px; transform: rotate(-6deg) scaleY(1.7); }
+  .hero .heart { height: 400px; transform: rotate(6deg) translateY(24px); }
+</style>
+</head>
+<body>
+<header>
+  <h1>MedChain SVG preview</h1>
+  <p class="tag">every asset on the cream canvas, before it goes near the dashboard</p>
+</header>
+
+<section class="hero">
+  <div>
+    <h2>COLLABORATIVE<br>TRAINING<br>NETWORK</h2>
+    <p class="tag">learning together, data stays home</p>
+  </div>
+  <div class="divider"><img class="sage" src="svg/blob-sage.svg" alt=""><img class="gold" src="svg/blob-gold.svg" alt=""></div>
+  <div><img class="heart" src="svg/heart-anatomical.svg" alt="anatomical heart"></div>
+</section>
+
+<div class="grid">
+  <figure class="wide cream"><div class="art"><img src="svg/ecg-wave.svg" alt=""></div><figcaption>ecg-wave.svg - divider</figcaption></figure>
+  <figure><div class="art"><img src="svg/hospital-building.svg" alt=""></div><figcaption>hospital-building.svg (lg)</figcaption></figure>
+  <figure><div class="art"><img src="svg/hospital-building-md.svg" alt=""></div><figcaption>hospital-building-md.svg</figcaption></figure>
+  <figure><div class="art"><img src="svg/hospital-building-sm.svg" alt=""></div><figcaption>hospital-building-sm.svg</figcaption></figure>
+  <figure><div class="art"><img src="svg/heart-anatomical.svg" alt=""></div><figcaption>heart-anatomical.svg</figcaption></figure>
+  <figure><div class="art"><img class="tilt-l" src="svg/stethoscope.svg" alt=""></div><figcaption>stethoscope.svg (-7deg)</figcaption></figure>
+  <figure><div class="art"><img class="tilt-r" src="svg/pill-leaf.svg" alt=""></div><figcaption>pill-leaf.svg (+6deg)</figcaption></figure>
+  <figure><div class="art"><img class="tilt-l" src="svg/microscope.svg" alt=""></div><figcaption>microscope.svg (-7deg)</figcaption></figure>
+  <figure class="wide"><div class="art"><img src="svg/network-chain.svg" alt=""></div><figcaption>network-chain.svg</figcaption></figure>
+  <figure class="cream"><div class="art"><img src="svg/blob-gold.svg" alt=""></div><figcaption>blob-gold.svg</figcaption></figure>
+  <figure class="cream"><div class="art"><img src="svg/blob-sage.svg" alt=""></div><figcaption>blob-sage.svg</figcaption></figure>
+  <figure class="cream"><div class="art"><img src="svg/blob-orange.svg" alt=""></div><figcaption>blob-orange.svg</figcaption></figure>
+  <figure class="cream"><div class="art"><img src="svg/favicon.svg" alt="" style="width:96px"></div><figcaption>favicon.svg</figcaption></figure>
+  <figure class="wide cream" style="padding:0"><div class="art" style="height:200px"><img src="svg/wave-divider.svg" alt=""></div><figcaption style="padding:0 16px 16px;background:#fff;margin:0">wave-divider.svg - 200px, solid fill of the section below</figcaption></figure>
+</div>
+</body>
+</html>

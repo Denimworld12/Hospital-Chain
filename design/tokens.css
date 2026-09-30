@@ -1,0 +1,69 @@
+/*
+ * MedChain design tokens - Pa'lais style reference, adapted to a medical theme.
+ * The first block is the Pa'lais custom-property set with its exact values;
+ * the second block maps those values onto MedChain roles. Components use the
+ * role tokens (--mc-*). Rules and rationale: design/STYLE.md.
+ */
+:root {
+  /* ---- Pa'lais reference values (exact) ---------------------------------- */
+  --color-deep-indigo: #234386;
+  --color-honey-gold: #ffc400;
+  --color-burnt-orange: #ed7328;
+  --color-sky-blue: #6aa8dc;
+  --color-warm-sand: #d2b68c;
+  --color-mint-sage: #a2d3a6;
+  --color-ink-black: #000000;
+  --color-pure-white: #ffffff;
+  --color-cream-paper: #fbf9f6;
+  --color-soft-shadow: #d6d6d6;
+
+  --text-caption: 12px; --leading-caption: 1.6; --tracking-caption: 1.67px;
+  --text-body-sm: 14px; --leading-body-sm: 1.67; --tracking-body-sm: 0.99px;
+  --text-body: 16px; --leading-body: 1.5; --tracking-body: 0.5px;
+  --text-subheading: 24px; --leading-subheading: 1; --tracking-subheading: 6.4px;
+  --text-heading-sm: 32px; --leading-heading-sm: 0.9; --tracking-heading-sm: 1.38px;
+  --text-heading: 46px; --leading-heading: 1.18; --tracking-heading: 1.98px;
+  --text-heading-lg: 56px; --leading-heading-lg: 1.14; --tracking-heading-lg: 1.74px;
+  --text-display: 88px; --leading-display: 0.82; --tracking-display: 0px;
+
+  --spacing-4: 4px; --spacing-8: 8px; --spacing-12: 12px; --spacing-16: 16px;
+  --spacing-24: 24px; --spacing-32: 32px; --spacing-40: 40px; --spacing-48: 48px;
+  --spacing-56: 56px; --spacing-64: 64px; --spacing-80: 80px; --spacing-128: 128px;
+  --page-max-width: 1200px; --section-gap: 64px; --card-padding: 16px; --element-gap: 8px;
+
+  --radius-tags: 16px; --radius-cards: 8px; --radius-inputs: 8px; --radius-buttons: 32px;
+
+  --shadow-xl: rgba(0, 0, 0, 0.05) 0px 20px 27px 0px;
+  --shadow-xl-2: rgba(0, 0, 0, 0.16) -14px 10px 49px 0px;
+
+  /* ---- Font stacks (Pa'lais substitutes) --------------------------------- */
+  --font-display: "Bebas Neue", "Anton", "Oswald", sans-serif; /* hwt-artz substitute: section headings */
+  --font-hero: "Oswald", "Bebas Neue", sans-serif;              /* Delivery Note substitute: hero-level */
+  --font-body: "DM Sans", "Inter", system-ui, sans-serif;        /* Axiforma substitute: body + UI */
+  --font-label: "Jost", "Futura", sans-serif;                    /* ITC Avant Garde substitute: nav + eyebrows */
+  --font-script: "Caveat", cursive;                              /* emotional taglines only */
+  --font-journal: "IBM Plex Mono", ui-monospace, monospace;      /* MedChain: audit-log journal rows */
+
+  /* ---- MedChain roles ----------------------------------------------------- */
+  --mc-canvas: var(--color-cream-paper);
+  --mc-card: var(--color-pure-white);
+  --mc-brand: var(--color-deep-indigo);   /* headlines, nav, links, filled CTA, dark sections */
+  --mc-text: var(--color-ink-black);      /* body text */
+  --mc-hairline: 1px solid var(--color-ink-black);
+
+  --mc-status-alive: var(--color-mint-sage);
+  --mc-status-down: var(--color-burnt-orange);
+
+  --mc-chart-line: var(--color-deep-indigo);
+  --mc-chart-dot: var(--color-honey-gold);
+  --mc-bar-full: var(--color-deep-indigo);   /* "full precision would cost" */
+  --mc-bar-sent: var(--color-honey-gold);    /* "actually sent" */
+
+  --mc-card-shadow: var(--shadow-xl-2);
+
+  --mc-button-padding: var(--spacing-24) var(--spacing-48);
+  --mc-button-text: 13px;
+  --mc-button-tracking: 0.1em;
+  --mc-eyebrow-tracking: 0.2em;
+  --mc-nav-tracking: 0.133em;
+}
