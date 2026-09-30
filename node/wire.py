@@ -17,6 +17,7 @@ H_ROUND = "X-MedChain-Round"
 H_SENDER = "X-MedChain-Sender"
 H_CHECKSUM = "X-MedChain-Checksum"
 H_DTYPE = "X-MedChain-Dtype"
+H_SECRET = "X-MedChain-Secret"
 
 
 def checksum(body: bytes) -> str:

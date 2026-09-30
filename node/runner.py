@@ -192,6 +192,7 @@ class Runner:
             wire.H_SENDER: self.cfg.node_id,
             wire.H_CHECKSUM: pkg.checksum,
             wire.H_DTYPE: pkg.dtype,
+            wire.H_SECRET: self.cfg.shared_secret,
             "Content-Type": "application/octet-stream",
         }
         participating = False

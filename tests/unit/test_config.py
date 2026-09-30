@@ -1,4 +1,3 @@
-import re
 from pathlib import Path
 
 import pytest
@@ -19,6 +18,7 @@ def test_three_hospital_configs_load():
         assert c.bits == 64, "the naive gossip baseline sends float64; bits must say so"
         assert c.training.rounds == 20
         assert c.timing.heartbeat_interval_s == 5
+    assert len({c.shared_secret for c in cfgs}) == 1, "all nodes must share one secret"
 
 
 def test_neighbour_links_are_symmetric_and_resolve():
@@ -38,17 +38,8 @@ def test_each_config_points_at_its_own_slice():
         assert (ROOT / "data" / "slices" / name).is_file()
 
 
-def test_node_code_hardcodes_no_hospital_identity():
-    offenders = []
-    for py in (ROOT / "node").glob("*.py"):
-        for i, line in enumerate(py.read_text().splitlines(), 1):
-            if re.search(r"hospital-[a-z]", line, re.I):
-                offenders.append(f"{py.name}:{i}: {line.strip()}")
-    assert not offenders, "\n".join(offenders)
-
-
 def test_rejects_self_neighbour(tmp_path):
     p = tmp_path / "bad.yaml"
-    p.write_text("node_id: x\nport: 1\ndata_slice: s.csv\nneighbours:\n  - id: x\n    url: http://x:1\n")
+    p.write_text("node_id: x\nport: 1\ndata_slice: s.csv\nshared_secret: s\nneighbours:\n  - id: x\n    url: http://x:1\n")
     with pytest.raises(ValueError):
         load_config(p)

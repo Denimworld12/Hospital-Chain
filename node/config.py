@@ -1,7 +1,7 @@
 """Node configuration, loaded from the YAML file named by $NODE_CONFIG.
 
 Nothing in node/ hardcodes a hospital identity: node_id, neighbours, port, data
-slice and engine parameters all come from this file.
+slice, shared secret and engine parameters all come from this file.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ class NodeConfig:
     port: int
     advertise_url: str
     data_slice: str
+    shared_secret: str
     neighbours: tuple[Neighbour, ...] = ()
     engine: str = "gossip-baseline"
     rho: float = 1.0
@@ -59,12 +60,14 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
     if not path.is_file():
         raise FileNotFoundError(f"node config not found: {path!s} (set NODE_CONFIG)")
     raw = yaml.safe_load(path.read_text()) or {}
-    missing = [k for k in ("node_id", "port", "data_slice") if k not in raw]
+    missing = [k for k in ("node_id", "port", "data_slice", "shared_secret") if k not in raw]
     if missing:
         raise ValueError(f"{path}: missing required keys {missing}")
     neighbours = tuple(Neighbour(id=str(n["id"]), url=str(n["url"]).rstrip("/")) for n in raw.get("neighbours") or [])
     if any(n.id == raw["node_id"] for n in neighbours):
         raise ValueError(f"{path}: a node cannot be its own neighbour")
+    if not str(raw["shared_secret"]):
+        raise ValueError(f"{path}: shared_secret must not be empty")
     port = int(raw["port"])
     return NodeConfig(
         node_id=str(raw["node_id"]),
@@ -72,6 +75,7 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
         port=port,
         advertise_url=str(raw.get("advertise_url", f"http://{raw['node_id']}:{port}")).rstrip("/"),
         data_slice=str(raw["data_slice"]),
+        shared_secret=str(raw["shared_secret"]),
         neighbours=neighbours,
         engine=str(raw.get("engine", "gossip-baseline")),
         rho=float(raw.get("rho", 1.0)),
