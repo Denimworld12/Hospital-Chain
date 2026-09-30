@@ -6,3 +6,7 @@ __pycache__/
 node_modules/
 dashboard/dist/
 .DS_Store
+# trained at image build time / by node.assess.train_tabular; the ECG .onnx is committed
+models/heart-risk.joblib
+# ~615 MB of Mendeley ECG images fetched by data/prepare_ecg.py
+data/ecg-images/

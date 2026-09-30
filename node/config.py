@@ -8,6 +8,7 @@ Engines (`engine:`, exactly one of these): `gossip` (the naive baseline),
 GADMM). The ADMM engines also read `chain` (node order 1..N),
 `rho`, `alpha`, `local_epochs`, `lr`, `epsilon`, `checkpoint_every`,
 `checkpoint_dir` and `seed` (the node's RNG uses seed + its chain position).
+The optional `assess` block overrides where the risk-assessment models are read from.
 """
 
 from __future__ import annotations
@@ -49,6 +50,14 @@ ADMM_ENGINES = (QGADMM, GADMM_FP)
 
 
 @dataclass(frozen=True)
+class AssessConfig:
+    """Model files for the per-patient risk assessment endpoints (inference only)."""
+
+    tabular_model: str = "/app/models/heart-risk.joblib"
+    ecg_model: str = "/app/models/ecg-resnet18.onnx"
+
+
+@dataclass(frozen=True)
 class NodeConfig:
     node_id: str
     display_name: str
@@ -72,6 +81,7 @@ class NodeConfig:
     seed: int = 42
     training: TrainingConfig = field(default_factory=TrainingConfig)
     timing: TimingConfig = field(default_factory=TimingConfig)
+    assess: AssessConfig = field(default_factory=AssessConfig)
 
     def neighbour(self, node_id: str) -> Neighbour | None:
         return next((n for n in self.neighbours if n.id == node_id), None)
@@ -124,6 +134,7 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
         seed=int(raw.get("seed", 42)),
         training=TrainingConfig(**(raw.get("training") or {})),
         timing=TimingConfig(**(raw.get("timing") or {})),
+        assess=AssessConfig(**(raw.get("assess") or {})),
     )
 
 

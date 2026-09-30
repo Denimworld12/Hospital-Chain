@@ -8,3 +8,12 @@ scikit-learn==1.6.0
 psycopg[binary]==3.2.3
 PyYAML==6.0.2
 torch==2.5.1
+# per-patient risk assessment (node/assess/); xgboost-cpu is the CPU-only Linux
+# wheel (no CUDA/NCCL), the plain wheel elsewhere. Both install the xgboost module.
+xgboost-cpu==3.4.1; sys_platform == "linux"
+xgboost==3.4.1; sys_platform != "linux"
+joblib==1.6.0
+onnxruntime==1.30.0
+pillow==12.3.0
+fpdf2==2.8.9
+python-multipart==0.0.20

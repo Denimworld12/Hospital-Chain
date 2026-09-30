@@ -181,6 +181,38 @@ def test_websocket_pushes_live_snapshots():
     assert {n["node_id"] for n in second["data"]["nodes"]} == set(NODES)
 
 
+PATIENT = {"age": 58, "gender": "male", "height": 172, "weight": 88, "ap_hi": 150, "ap_lo": 95,
+           "cholesterol": 2, "gluc": 1, "smoke": True, "alco": False, "active": False}
+
+
+def ecg_png() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (800, 600), "white").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_risk_assessment_on_every_node_and_via_the_dashboard():
+    secret = next(iter(NODES.values())).shared_secret
+    for node_id in NODES:
+        assert get(f"{node_url(node_id)}/status").json()["assess"] == {"tabular": True, "ecg": True}
+        assert httpx.post(f"{node_url(node_id)}/assess", json=PATIENT, timeout=15).status_code == 401
+        r = httpx.post(f"{node_url(node_id)}/assess", json=PATIENT, headers={"X-MedChain-Secret": secret}, timeout=15)
+        assert r.status_code == 200 and r.json()["node_id"] == node_id
+        assert r.json()["risk_tier"] in ("LOW", "MODERATE", "HIGH")
+    last = sorted(NODES)[-1]
+    via = httpx.post(f"{DASHBOARD}/api/assess", params={"node": last}, json=PATIENT, timeout=15)
+    assert via.status_code == 200 and via.json()["node_id"] == last
+    assert via.json()["model"]["metrics"]["roc_auc"] > 0.75  # the full model, trained at image build
+    pdf = httpx.post(f"{DASHBOARD}/api/assess/pdf", json=PATIENT, timeout=15)
+    assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
+    ecg = httpx.post(f"{DASHBOARD}/api/assess/ecg", files={"ecg": ("ecg.png", ecg_png(), "image/png")}, timeout=15)
+    assert ecg.status_code == 200 and set(ecg.json()["probabilities"]) == {"normal", "mi", "abnormal"}
+
+
 def test_training_run_completes_and_is_audited():
     wait_idle()
     from websockets.sync.client import connect
