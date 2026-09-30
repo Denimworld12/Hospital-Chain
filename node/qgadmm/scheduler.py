@@ -26,7 +26,10 @@ the neighbour said it accepted ours on time (the /update response) - so both end
 make the same decision and their copies of lambda stay identical even when a
 neighbour dies or is slow. A receiver decides "on time" atomically: once it stops
 waiting for (round, sender), later packets for that round are answered
-`on_time: false` and applied at its next phase as pending packets.
+`on_time: false` and applied at its next phase as pending packets. It also answers
+`on_time: false` for a packet that does not fold cleanly into its mirror (the
+mirror needs a GET /snapshot resync first), so an edge whose mirror is out of sync
+never takes the dual step at either end, whether or not the resync succeeds.
 
 Networked convergence: each node only computes the residuals of its own edges, so
 nodes gossip their recent per-edge residuals in a header. The first node that sees
@@ -184,10 +187,18 @@ class ChainRoundScheduler(Runner):
         self._closed_upto = {m: start_round - 1 for m in self.pos.neighbours}  # windows closed up to this round
         self._peer_round = {m: 0 for m in self.pos.neighbours}  # latest round seen from each neighbour
         self._peer_alive = {m: True for m in self.pos.neighbours}
+        self._acked: set[tuple[int, str]] = set()  # (round, sender) packets answered on_time
 
     # -- inbound --------------------------------------------------------------
     def _on_time(self, run_id: str, update: NeighborUpdate) -> bool:
-        return run_id == self.run_id and update.round > self._closed_upto.get(update.sender, 0)
+        if run_id != self.run_id or update.round <= self._closed_upto.get(update.sender, 0):
+            return False
+        buffered = [ups[update.sender] for (rid, _), ups in self._inbox.items()
+                    if rid == run_id and update.sender in ups]
+        if not self.engine.applies_cleanly(update.sender, buffered):
+            return False
+        self._acked.add((update.round, update.sender))
+        return True
 
     async def receive(self, run_id: str, update: NeighborUpdate, meta: Mapping[str, str] | None = None) -> dict:
         if run_id == self.run_id and self.active and update.sender in self._peer_round:
@@ -279,7 +290,7 @@ class ChainRoundScheduler(Runner):
         send_ok, participating = await self._send_all(run_id, r)
         got = await self._wait(run_id, r, participating)
         current = await self._apply(run_id, r, self._take(run_id, r))
-        received_ok = set(got) & current
+        received_ok = self._counted(r, got) & current
         missing = sorted(set(self.pos.neighbours) - set(got))
         return local, send_ok & received_ok, len(got), missing
 
@@ -288,7 +299,7 @@ class ChainRoundScheduler(Runner):
         expected = {m for m in self.pos.neighbours if self._peer_alive[m]}
         got = await self._wait(run_id, r, expected)
         current = await self._apply(run_id, r, self._take(run_id, r))
-        received_ok = set(got) & current
+        received_ok = self._counted(r, got) & current
         local = await asyncio.to_thread(self.engine.train_round, r)
         send_ok, _ = await self._send_all(run_id, r)
         missing = sorted(set(self.pos.neighbours) - set(got))
@@ -341,6 +352,12 @@ class ChainRoundScheduler(Runner):
         if late:
             log.warning("round %d: no packet from %s within %.1fs; reusing the stale mirror", r, sorted(late), timeout)
         return got
+
+    def _counted(self, r: int, got: Mapping[str, NeighborUpdate]) -> set[str]:
+        """Senders of round-r packets I answered on_time (the only ones the sender counts too)."""
+        counted = {m for m in got if (r, m) in self._acked}
+        self._acked = {k for k in self._acked if k[0] > r}
+        return counted
 
     def _take(self, run_id: str, upto: int) -> list[NeighborUpdate]:
         out = []

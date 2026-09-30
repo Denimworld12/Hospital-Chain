@@ -9,6 +9,7 @@ import time
 import httpx
 import numpy as np
 import pytest
+from fastapi import HTTPException
 
 from chain_harness import AUTH, NodeServer, wait_until, write_configs
 from node import wire
@@ -174,4 +175,46 @@ def test_pause_does_not_degrade_rounds(chain):
     wait_until(lambda: all_completed(nodes), 120, "run completes", 0.2)
     for s in nodes.values():
         assert not s.db.events("round_degraded"), s.cfg.node_id
+    assert_edges_in_sync(nodes)
+
+
+def test_a_mirror_whose_snapshot_resync_fails_keeps_both_ends_of_the_edge_in_step(chain):
+    """hospital-b's mirror of hospital-a drifts; its GET /snapshot resyncs fail 3 times before one succeeds.
+
+    hospital-a's packets no longer fold into that mirror, so the edge must skip its dual step at
+    *both* ends until the resync lands, or the two copies of lambda_{a,b} part for good.
+    """
+    nodes, _ = chain
+    a, b = nodes["hospital-a"], nodes["hospital-b"]
+    failures = []
+    serve = a.engine.snapshot_for
+
+    def flaky_snapshot(requester):
+        if len(failures) < 3:
+            failures.append(requester)
+            raise HTTPException(503, detail="snapshot unavailable")
+        return serve(requester)
+
+    a.engine.snapshot_for = flaky_snapshot
+    dual = b.engine.dual_update
+    drifted = []
+
+    def dual_then_drift(completed):
+        dual(completed)
+        if not drifted and b.runner.current_round >= 5:
+            with b.engine.lock:
+                st = b.engine.state
+                st.mirrors["hospital-a"] = st.mirrors["hospital-a"] + 1e-3
+            drifted.append(b.runner.current_round)
+
+    b.engine.dual_update = dual_then_drift
+    start(nodes)
+    wait_until(lambda: all_completed(nodes), 120, "run completes", 0.2)
+
+    assert drifted and failures == ["hospital-b"] * 3
+    assert b.db.events("snapshot_resync"), "the resync eventually succeeds"
+    a_skipped = {m["round_num"] for m in a.db.metrics if "hospital-b" not in m["residuals"]["exchanged"]}
+    b_skipped = {m["round_num"] for m in b.db.metrics if "hospital-a" not in m["residuals"]["exchanged"]}
+    assert len(b_skipped) >= 3 and a_skipped == b_skipped
+    assert_consensus_streak(nodes)
     assert_edges_in_sync(nodes)

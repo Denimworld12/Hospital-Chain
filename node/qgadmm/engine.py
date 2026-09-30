@@ -216,29 +216,49 @@ class QGADMMEngine(Engine):
             for u in sorted(updates, key=lambda u: (u.sender, u.seq or 0)):
                 if u.sender not in self.state.mirrors:
                     raise ValueError(f"update from {u.sender}, which is not a chain neighbour of {self.pos.node_id}")
-                mirror = self.state.mirrors[u.sender]
-                have = fingerprint(mirror)
-                if u.seq is not None and u.seq <= self.state.mirror_seq[u.sender]:
-                    duplicate.append(u.sender)  # already reflected (e.g. overtaken by a snapshot resync)
-                    continue
-                if u.produces and have == u.produces:
+                outcome, new, seq = self._fold(self.state.mirrors[u.sender], self.state.mirror_seq[u.sender], u)
+                if outcome == "duplicate":
                     duplicate.append(u.sender)
-                    continue
-                if u.base and have != u.base:
+                elif outcome == "resync":
                     log.warning("packet seq %s from %s does not apply to my mirror (mirror seq %s)", u.seq, u.sender,
                                 self.state.mirror_seq[u.sender])
                     resync.append(u.sender)
-                    continue
-                pkt = quantizer.decode(u.body, self.d)
-                new = quantizer.reconstruct(mirror, pkt)
-                if u.produces and fingerprint(new) != u.produces:
-                    log.error("mirror of %s drifted after seq %s", u.sender, u.seq)
-                    resync.append(u.sender)
-                    continue
-                self.state.mirrors[u.sender] = new
-                self.state.mirror_seq[u.sender] = u.seq if u.seq is not None else self.state.mirror_seq[u.sender] + 1
-                applied.append(u.sender)
+                else:
+                    self.state.mirrors[u.sender], self.state.mirror_seq[u.sender] = new, seq
+                    applied.append(u.sender)
         return ApplyResult(tuple(applied), tuple(duplicate), tuple(dict.fromkeys(resync)))
+
+    def applies_cleanly(self, sender: str, updates: Sequence[NeighborUpdate]) -> bool:
+        """True when these packets from `sender` fold into my mirror, in sequence order, without a resync.
+
+        A dry run of apply_neighbor_update that changes nothing. It reads the mirror without taking the
+        engine lock (mirrors are replaced, never mutated in place), so it does not wait for a primal step.
+        """
+        mirror, seq = self.state.mirrors.get(sender), self.state.mirror_seq.get(sender)
+        if mirror is None:
+            return False
+        for u in sorted(updates, key=lambda u: u.seq or 0):
+            outcome, new, new_seq = self._fold(mirror, seq, u)
+            if outcome == "resync":
+                return False
+            if outcome == "applied":
+                mirror, seq = new, new_seq
+        return True
+
+    def _fold(self, mirror: np.ndarray, mirror_seq: int, u: NeighborUpdate) -> tuple[str, np.ndarray, int]:
+        """One packet against one mirror: ("duplicate" | "resync" | "applied", resulting mirror, its seq)."""
+        if u.seq is not None and u.seq <= mirror_seq:
+            return "duplicate", mirror, mirror_seq  # already reflected (e.g. overtaken by a snapshot resync)
+        have = fingerprint(mirror)
+        if u.produces and have == u.produces:
+            return "duplicate", mirror, mirror_seq
+        if u.base and have != u.base:
+            return "resync", mirror, mirror_seq
+        new = quantizer.reconstruct(mirror, quantizer.decode(u.body, self.d))
+        if u.produces and fingerprint(new) != u.produces:
+            log.error("mirror of %s drifted after seq %s", u.sender, u.seq)
+            return "resync", mirror, mirror_seq
+        return "applied", new, u.seq if u.seq is not None else mirror_seq + 1
 
     def dual_update(self, completed: set[str] | Sequence[str]) -> None:
         """Eq. 18 on each edge whose exchange completed both ways this round; the rest keep their lambda."""

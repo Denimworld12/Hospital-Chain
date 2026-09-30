@@ -47,11 +47,12 @@ def test_admm_engines_need_a_consistent_chain(tmp_path):
         load_config(base_yaml(tmp_path, "engine: qgadmm\nchain: [a, c, b]\n" + nb))
     ok = load_config(base_yaml(tmp_path, "engine: gadmm_fp\nchain: [a, b, c]\n" + nb))
     assert ok.is_admm and ok.chain == ("a", "b", "c")
-    # the gossip baseline does not need a chain; its legacy name still loads
-    legacy = load_config(base_yaml(tmp_path, "engine: gossip-baseline\n" + nb))
-    assert legacy.engine == "gossip" and not legacy.is_admm
-    with pytest.raises(ValueError, match="unknown engine"):
-        load_config(base_yaml(tmp_path, "engine: sgd\n" + nb))
+    # the gossip baseline does not need a chain; only the three engine names load
+    gossip = load_config(base_yaml(tmp_path, "engine: gossip\n" + nb))
+    assert gossip.engine == "gossip" and not gossip.is_admm
+    for name in ("gossip-baseline", "sgd"):
+        with pytest.raises(ValueError, match="unknown engine"):
+            load_config(base_yaml(tmp_path, f"engine: {name}\n" + nb))
 
 
 def test_neighbour_links_are_symmetric_and_resolve():

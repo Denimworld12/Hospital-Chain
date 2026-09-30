@@ -50,7 +50,6 @@ neighbours:
 
 @pytest.mark.parametrize("engine,label", [
     ("gossip", "naive gossip baseline"),
-    ("gossip-baseline", "naive gossip baseline"),
     ("qgadmm", "Q-GADMM (b=2)"),
     ("gadmm_fp", "GADMM full precision (float32 deltas)"),
 ])

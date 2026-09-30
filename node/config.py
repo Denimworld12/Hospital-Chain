@@ -3,9 +3,9 @@
 Nothing in node/ hardcodes a hospital identity: node_id, neighbours, port, data
 slice, shared secret and engine parameters all come from this file.
 
-Engines (`engine:`): `gossip` (the naive baseline; `gossip-baseline` is accepted
-as its legacy name), `qgadmm` (Q-GADMM, `bits` in {2, 4, 8}) and `gadmm_fp`
-(full-precision GADMM). The ADMM engines also read `chain` (node order 1..N),
+Engines (`engine:`, exactly one of these): `gossip` (the naive baseline),
+`qgadmm` (Q-GADMM, `bits` in {2, 4, 8}) and `gadmm_fp` (full-precision
+GADMM). The ADMM engines also read `chain` (node order 1..N),
 `rho`, `alpha`, `local_epochs`, `lr`, `epsilon`, `checkpoint_every`,
 `checkpoint_dir` and `seed` (the node's RNG uses seed + its chain position).
 """
@@ -44,7 +44,7 @@ class TimingConfig:
 GOSSIP = "gossip"
 QGADMM = "qgadmm"
 GADMM_FP = "gadmm_fp"
-ENGINE_ALIASES = {"gossip": GOSSIP, "gossip-baseline": GOSSIP, "qgadmm": QGADMM, "gadmm_fp": GADMM_FP}
+ENGINE_ALIASES = {"gossip": GOSSIP, "qgadmm": QGADMM, "gadmm_fp": GADMM_FP}
 ADMM_ENGINES = (QGADMM, GADMM_FP)
 
 
