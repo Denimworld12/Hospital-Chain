@@ -1,0 +1,34 @@
+import heart from "@assets/heart-anatomical.svg";
+import pillLeaf from "@assets/pill-leaf.svg";
+import { Blob, Eyebrow, Illustration } from "./ui.jsx";
+
+export default function Hero({ engine }) {
+  return (
+    <section className="hero">
+      <div className="hero__copy">
+        <Eyebrow>MedChain / decentralized learning for hospitals</Eyebrow>
+        <h1 className="hero__headline">
+          Collaborative
+          <br />
+          Training
+          <br />
+          Network
+        </h1>
+        <p className="script hero__tagline">learning together, data stays home</p>
+        <p className="hero__body">
+          Three hospitals train one heart-disease model together. Patient records never leave the
+          building: only model weight arrays travel between neighbouring nodes.
+        </p>
+        <p className="tag">Engine: {engine}</p>
+      </div>
+      <div className="hero__divider" aria-hidden="true">
+        <Blob color="sage" className="hero__blob hero__blob--sage" />
+        <Blob color="gold" className="hero__blob hero__blob--gold" />
+      </div>
+      <div className="hero__art">
+        <Illustration src={heart} rotate={6} className="hero__heart" />
+      </div>
+      <Illustration src={pillLeaf} rotate={-8} className="hero__accent" />
+    </section>
+  );
+}
