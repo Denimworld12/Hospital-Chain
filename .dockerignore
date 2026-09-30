@@ -5,3 +5,5 @@
 **/__pycache__
 dashboard/dist
 tests
+data/ecg-images
+models/heart-risk.joblib

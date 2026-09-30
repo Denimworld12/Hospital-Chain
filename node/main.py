@@ -9,6 +9,8 @@ Endpoints
     POST /update          receive a neighbour's update (the engine's packet bytes)
     GET  /snapshot        ADMM engines: my full theta_hat for a restarted/drifted neighbour
     GET  /metrics         this node's per-round metrics for the current/last run
+    POST /assess, /assess/pdf, /assess/ecg, /assess/ecg/pdf
+                          per-patient risk assessment (node/assess/routes.py)
 
 Identity comes entirely from the YAML config named by $NODE_CONFIG.
 """
@@ -28,6 +30,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from . import wire
+from .assess.routes import Assessor, build_router as build_assess_router
 from .config import NodeConfig, load_config
 from .db import Database, NullDatabase
 from .engine import NeighborUpdate
@@ -64,6 +67,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         local_epochs=cfg.training.local_epochs,
     )
     engine = build_engine(cfg, trainer)
+    assessor = Assessor(cfg.assess.tabular_model, cfg.assess.ecg_model)
     db = DbWriter(database)
     started_at = time.time()
     state: dict = {}
@@ -110,6 +114,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             raise HTTPException(401, detail="missing or invalid shared secret")
 
     peer_only = [Depends(require_secret)]
+    app.include_router(build_assess_router(cfg.node_id, cfg.display_name, assessor, peer_only))
 
     async def flood(path: str, payload: dict, exclude: str | None) -> dict[str, str]:
         async def one(n):
@@ -148,6 +153,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             "current_round": r.current_round,
             "total_rounds": r.total_rounds,
             "uptime_s": round(time.time() - started_at, 1),
+            "assess": assessor.status(),
         }
 
     @app.get("/metrics")

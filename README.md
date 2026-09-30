@@ -13,6 +13,14 @@ baseline** (each node averages its weights with its neighbours') stay in the
 codebase as selectable comparisons behind the same swappable `Engine` interface
 (`node/engine.py`). See [Engines](#engines).
 
+Each hospital node also serves a separate **per-patient risk assessment**: a
+RandomForest + XGBoost heart-risk ensemble and a ResNet18 ECG image classifier,
+ported from [HEALIGRAM](https://github.com/avdhoot-hande/HEALIGRAM)'s approach
+and trained fresh in this repository. It is an inference tool only. It is not
+part of federated training, and the patients it scores are never stored. Both
+models are trained on public, **non-Indian** datasets (see
+[Risk assessment](#3-assess-a-patient-optional)).
+
 ## What it looks like
 
 These screenshots come from a real stack running this repository's code. Each
@@ -65,6 +73,17 @@ engines' `round_degraded`, `consensus_detected`, `snapshot_resync` (with its
 byte cost) and `rejoined_from_checkpoint` events. (Screenshot from the
 gossip-baseline MVP.)
 
+### Risk assessment
+
+![Risk assessment: patient form, LOW/MODERATE/HIGH tier, per-model confidence bars, risk factors and an ECG upload](docs/screenshots/risk-assessment.png)
+
+A form for one patient's readings, scored by the hospital node you pick. The
+result shows the risk tier, the blended probability, the RandomForest and
+XGBoost confidences against the 30% decision threshold, and the critical,
+moderate and lifestyle risk factors. **DOWNLOAD PDF REPORT** returns the same
+assessment as a PDF. Below it, an ECG image upload is classified as normal,
+myocardial infarction or abnormal heartbeat.
+
 ## Requirements
 
 - **Docker** with the **Docker Compose v2** plugin (`docker compose ...`).
@@ -78,7 +97,9 @@ gossip-baseline MVP.)
 - **Internet access on the first build**, to pull the base images and install
   the pip and npm packages (the node image installs CPU-only PyTorch from the
   PyTorch wheel index). The data slices ship in `data/slices/`, so the dataset
-  does not need to be downloaded.
+  does not need to be downloaded. The first node build also trains the
+  tabular risk model from `data/cardio/cardio_train.csv`, which adds about a
+  minute.
 - To run the tests or `experiments/compare_engines.py` outside Docker, you need
   **Python 3.12** and `pip install -r requirements-dev.txt`, which includes
   PyTorch and matplotlib (see [Tests](#tests)).
@@ -101,7 +122,7 @@ docker compose ps
 
 | Service | Host port | What it is |
 | --- | --- | --- |
-| `hospital-a` / `hospital-b` / `hospital-c` | 8001 / 8002 / 8003 | FastAPI node: `GET /health`, `GET /status`, `POST /round/start`, `POST /update`, `GET /snapshot`, `GET /metrics` (+ `POST /round/pause`, `/round/resume`). All three run the same image, and the mounted `config/hospital-*.yaml` decides which hospital it is and which engine it runs. Each node mounts only its own data slice. |
+| `hospital-a` / `hospital-b` / `hospital-c` | 8001 / 8002 / 8003 | FastAPI node: `GET /health`, `GET /status`, `POST /round/start`, `POST /update`, `GET /snapshot`, `GET /metrics` (+ `POST /round/pause`, `/round/resume`, and the `POST /assess*` risk-assessment endpoints). All three run the same image, and the mounted `config/hospital-*.yaml` decides which hospital it is and which engine it runs. Each node mounts only its own data slice. |
 | `postgres` (container `medchain-postgres`) | 5432 | Holds `nodes`, `runs`, `rounds`, `updates_meta`, `metrics` and `audit_logs`. |
 | `dashboard` | 8080 | Observer UI. It reads Postgres and pushes snapshots and update events over `/ws`. |
 
@@ -152,6 +173,7 @@ Open <http://localhost:8080> in a browser.
   neighbours") collapse and the **CONSENSUS REACHED** pill fire, the network
   training loss fall, the communication counters fill with measured packet
   sizes, and envelopes fly along the chain on each `/update`.
+- **RISK ASSESSMENT** is the separate per-patient tool described in step 3.
 
 The per-hospital cards show each hospital's loss on its own held-out patients.
 Hospitals A and B improve; hospital C (VA Long Beach, the most different slice)
@@ -163,6 +185,60 @@ objective the chain minimises, and it falls to the centralized optimum.
 The dashboard only observes. Its buttons send a single request to one live
 node, which floods it to the others, just like the `curl` above. The dashboard
 never coordinates training, so stopping it does not affect a running round.
+
+### 3. Assess a patient (optional)
+
+Open **RISK ASSESSMENT** in the dashboard, pick a hospital node, enter the
+readings and press **ASSESS RISK**. You can also call a node directly. The
+`/assess` endpoints need the same `X-MedChain-Secret` header as `/round/*`:
+
+```sh
+curl -X POST http://localhost:8001/assess \
+  -H 'Content-Type: application/json' \
+  -H 'X-MedChain-Secret: medchain-demo-secret' \
+  -d '{"age": 58, "gender": "male", "height": 172, "weight": 88, "ap_hi": 150, "ap_lo": 95,
+       "cholesterol": 2, "gluc": 1, "smoke": true, "alco": false, "active": false}'
+```
+
+The response has `prediction`, `confidence` (the blended probability in %),
+`rf_confidence`, `xgb_confidence`, `threshold`, `risk_tier`,
+`critical_factors`, `moderate_factors`, `lifestyle_factors` and the model's
+held-out metrics. `cholesterol` and `gluc` are 1 (normal), 2 (above normal) or
+3 (well above normal).
+
+| Endpoint | Body | Returns |
+| --- | --- | --- |
+| `POST /assess` | patient JSON as above | assessment JSON |
+| `POST /assess/pdf` | patient JSON | PDF report |
+| `POST /assess/ecg` | multipart field `ecg` (PNG/JPG of a 12-lead ECG printout) | class, confidence, per-class probabilities |
+| `POST /assess/ecg/pdf` | multipart field `ecg` | PDF report |
+
+```sh
+curl -X POST http://localhost:8001/assess/ecg \
+  -H 'X-MedChain-Secret: medchain-demo-secret' -F ecg=@my-ecg.jpg
+```
+
+How the models work:
+
+- **Tabular ensemble** (`node/assess/`): the same feature engineering as
+  HEALIGRAM (age groups, BMI and BMI category, pulse pressure, hypertension
+  stage, two interaction terms), a class-balanced RandomForest and an
+  isotonic-calibrated XGBoost, blended `0.4 * RF + 0.6 * XGB`. A blended
+  probability of 30% or more is positive. Positives at 85% or more are
+  **HIGH**, other positives are **MODERATE**, and the rest are **LOW**. It is
+  trained on the Kaggle Cardiovascular Disease dataset (70,000 patients,
+  general and international). The node image trains it at build time. Held-out
+  ROC-AUC is about 0.80, and accuracy is about 68% at the 30% threshold.
+- **ECG classifier**: an ImageNet-pretrained ResNet18 with a 3-class head,
+  fine-tuned on the Mendeley ECG Images dataset (928 printouts from a
+  cardiology institute in Multan, Pakistan; CC BY 4.0). It runs under ONNX
+  Runtime, so nodes do not need torch. The trained model is committed as
+  `models/ecg-resnet18.onnx`. To retrain it, run
+  `pip install -r requirements-ecg-train.txt`, then
+  `python3 data/prepare_ecg.py`, then `python -m node.assess.train_ecg`.
+
+Neither dataset is Indian-sourced. Provenance and licenses are in
+`data/README.md`. The output is a screening aid, not a diagnosis.
 
 ### Kill-and-rejoin demo (optional)
 
@@ -300,7 +376,7 @@ of 159.
 - **Checkpoints**: the ADMM engines pickle their state every `checkpoint_every`
   rounds to a per-node docker volume (`/checkpoints`); a restarted node rejoins its
   run from there.
-- **Shared secret**: `/update`, `/snapshot` and `/round/*` require the
+- **Shared secret**: `/update`, `/snapshot`, `/round/*` and `/assess*` require the
   `X-MedChain-Secret` header to match `shared_secret` in the node config (one demo
   value for all nodes; the dashboard gets it via `MEDCHAIN_SHARED_SECRET`), otherwise
   401. `/health`, `/status` and `/metrics` stay open.
@@ -308,13 +384,17 @@ of 159.
   single start/pause request to one node, which floods it to the others; it learns
   about each `/update` from the `updates_meta` rows the nodes write. Killing the
   dashboard does not affect a run (tested).
+- **Risk assessment is separate from training** (`node/assess/`): its models
+  are trained centrally, not by the training engines. The dashboard relays each
+  request to the node you pick and stores nothing. `/status` reports whether
+  each model is loaded.
 
 ## Layout
 
 ```
 docker-compose.yml   config/        node/          dashboard/
 design/              assets/svg/    data/          tests/        experiments/
-docs/screenshots/
+docs/screenshots/    models/
 ```
 
 - `design/STYLE.md` and `design/tokens.css` are the Pa'lais style reference,
@@ -323,6 +403,10 @@ docs/screenshots/
   shows every asset on the cream canvas.
 - `data/prepare_uci.py` re-downloads UCI Heart Disease and rebuilds the three
   non-IID slices (Cleveland, Hungarian, VA Long Beach). See `data/README.md`.
+- `data/cardio/` holds the Kaggle CSV the tabular risk model trains on, and
+  `data/prepare_ecg.py` fetches the ECG images. `models/` holds the exported
+  ECG model. `python -m node.assess.train_tabular` writes the tabular model
+  to `models/heart-risk.joblib` for local runs; that file is gitignored.
 
 ## Tests
 
@@ -338,7 +422,8 @@ determinism (exact float equality over 50 rounds), the boundary nodes' single
 penalty/dual term, convergence sanity (N = 5 synthetic linear regression: Q-GADMM
 b=2 within 1% of full-precision GADMM and 2% of centralized scikit-learn), and a
 three-node chain of real node apps over HTTP in one process, including a tail
-kill and checkpoint rejoin. `tests/integration` runs against whichever engine the
+kill and checkpoint rejoin, plus the risk-assessment endpoints (JSON and PDF
+reports for the tabular and ECG models). `tests/integration` runs against whichever engine the
 configs select; CI (`.github/workflows/ci.yml`) runs it for `qgadmm`, `gadmm_fp`
 and `gossip`, plus the unit tests, the dashboard build, the docker build and a
 headless `compare_engines.py` run.
