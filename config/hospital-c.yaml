@@ -1,0 +1,36 @@
+# MedChain node configuration. Every node runs the same image; this file alone
+# decides which hospital it is, who its neighbours are, and which data it reads.
+node_id: hospital-c
+display_name: Hospital C
+port: 8003
+advertise_url: http://hospital-c:8003
+
+# Chain topology A - B - C (the layout Q-GADMM expects in a later phase).
+neighbours:
+  - id: hospital-b
+    url: http://hospital-b:8002
+
+# Only this hospital's own slice is mounted into its container.
+data_slice: /data/hospital-c.csv
+
+# Training engine. The only engine today is the naive gossip baseline:
+# plain neighbour weight averaging.
+engine: gossip-baseline
+
+# Reserved for the ADMM-based engine (Q-GADMM) in a later phase. The naive gossip
+# baseline ignores rho and always sends full-precision float64 weights, so bits
+# must stay 64 until quantization lands.
+rho: 1.0
+bits: 64
+
+training:
+  rounds: 20
+  local_epochs: 2
+  learning_rate: 0.005
+  test_fraction: 0.25
+  seed: 7
+
+timing:
+  heartbeat_interval_s: 5
+  round_timeout_s: 6
+  round_pause_s: 1.0
