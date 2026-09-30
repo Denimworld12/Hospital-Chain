@@ -122,7 +122,7 @@ docker compose ps
 
 | Service | Host port | What it is |
 | --- | --- | --- |
-| `hospital-a` / `hospital-b` / `hospital-c` | 8001 / 8002 / 8003 | FastAPI node: `GET /health`, `GET /status`, `POST /round/start`, `POST /update`, `GET /snapshot`, `GET /metrics` (+ `POST /round/pause`, `/round/resume`). All three run the same image, and the mounted `config/hospital-*.yaml` decides which hospital it is and which engine it runs. Each node mounts only its own data slice. |
+| `hospital-a` / `hospital-b` / `hospital-c` | 8001 / 8002 / 8003 | FastAPI node: `GET /health`, `GET /status`, `POST /round/start`, `POST /update`, `GET /snapshot`, `GET /metrics` (+ `POST /round/pause`, `/round/resume`, and the `POST /assess*` risk-assessment endpoints). All three run the same image, and the mounted `config/hospital-*.yaml` decides which hospital it is and which engine it runs. Each node mounts only its own data slice. |
 | `postgres` (container `medchain-postgres`) | 5432 | Holds `nodes`, `runs`, `rounds`, `updates_meta`, `metrics` and `audit_logs`. |
 | `dashboard` | 8080 | Observer UI. It reads Postgres and pushes snapshots and update events over `/ws`. |
 
@@ -422,7 +422,8 @@ determinism (exact float equality over 50 rounds), the boundary nodes' single
 penalty/dual term, convergence sanity (N = 5 synthetic linear regression: Q-GADMM
 b=2 within 1% of full-precision GADMM and 2% of centralized scikit-learn), and a
 three-node chain of real node apps over HTTP in one process, including a tail
-kill and checkpoint rejoin. `tests/integration` runs against whichever engine the
+kill and checkpoint rejoin, plus the risk-assessment endpoints (JSON and PDF
+reports for the tabular and ECG models). `tests/integration` runs against whichever engine the
 configs select; CI (`.github/workflows/ci.yml`) runs it for `qgadmm`, `gadmm_fp`
 and `gossip`, plus the unit tests, the dashboard build, the docker build and a
 headless `compare_engines.py` run.
