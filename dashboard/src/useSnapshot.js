@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 
+// "update" events (one per POST /update a node logged) go to subscribers instead of React state,
+// so a busy run animates envelopes without re-rendering the whole dashboard.
+const updateListeners = new Set();
+export function subscribeUpdates(fn) {
+  updateListeners.add(fn);
+  return () => updateListeners.delete(fn);
+}
+
 // Live snapshot from the observer server's WebSocket, with automatic reconnect.
 export function useSnapshot() {
   const [snapshot, setSnapshot] = useState(null);
@@ -21,6 +29,7 @@ export function useSnapshot() {
         try {
           const msg = JSON.parse(ev.data);
           if (msg.type === "snapshot") setSnapshot(msg.data);
+          else if (msg.type === "update") for (const fn of updateListeners) fn(msg.data);
         } catch {
           /* ignore malformed frames */
         }

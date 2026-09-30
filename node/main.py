@@ -6,7 +6,8 @@ Endpoints
     POST /round/start     start (or join) a training run; floods to neighbours
     POST /round/pause     pause at the next round boundary; floods
     POST /round/resume    resume a paused run; floods
-    POST /update          receive a neighbour's weight array (raw float64 body)
+    POST /update          receive a neighbour's update (the engine's packet bytes)
+    GET  /snapshot        ADMM engines: my full theta_hat for a restarted/drifted neighbour
     GET  /metrics         this node's per-round metrics for the current/last run
 
 Identity comes entirely from the YAML config named by $NODE_CONFIG.
@@ -23,14 +24,14 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from . import wire
 from .config import NodeConfig, load_config
 from .db import Database, NullDatabase
 from .engine import NeighborUpdate
-from .gossip import build_engine
+from .engines import build_engine, build_runner
 from .runner import Runner, new_run_id
 from .trainer import LocalTrainer
 from .writer import DbWriter
@@ -62,7 +63,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         learning_rate=cfg.training.learning_rate,
         local_epochs=cfg.training.local_epochs,
     )
-    engine = build_engine(cfg.engine, trainer, bits=cfg.bits, rho=cfg.rho)
+    engine = build_engine(cfg, trainer)
     db = DbWriter(database)
     started_at = time.time()
     state: dict = {}
@@ -75,8 +76,8 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         client = httpx.AsyncClient(timeout=httpx.Timeout(3.0, connect=1.5))
-        runner = Runner(cfg, engine, db, client)
-        state["runner"] = runner
+        runner = build_runner(cfg, engine, db, client)
+        state["runner"] = app.state.runner = runner
         db.start()
         db.ensure_schema()
         db.register_node(node_id=cfg.node_id, display_name=cfg.display_name, url=cfg.advertise_url,
@@ -84,12 +85,16 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         db.audit(node_id=cfg.node_id, event="node_registered",
                  detail={"engine": engine.label, "patients": trainer.n_patients, "neighbours": [n.id for n in cfg.neighbours]})
         hb = asyncio.create_task(heartbeat_loop(runner))
+        if cfg.is_admm:  # a checkpoint on the volume means we were killed mid-run: rejoin it
+            state["rejoin"] = asyncio.create_task(runner.rejoin())
         log.info("%s up on :%d with %d patients, neighbours=%s, engine=%s", cfg.node_id, cfg.port,
                  trainer.n_patients, [n.id for n in cfg.neighbours], engine.label)
         try:
             yield
         finally:
             hb.cancel()
+            if "rejoin" in state:
+                state["rejoin"].cancel()
             await runner.shutdown()
             await client.aclose()
             db.stop()
@@ -129,11 +134,14 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             "node_id": cfg.node_id,
             "display_name": cfg.display_name,
             "engine": engine.label,
+            "engine_name": cfg.engine,
             "patients": trainer.n_patients,
             "n_train": len(trainer.y_train),
             "n_test": len(trainer.y_test),
-            "bits": cfg.bits,
+            "bits": getattr(engine, "bits", 64),
             "rho": cfg.rho,
+            **({"chain": list(cfg.chain), "position": engine.pos.position, "group": engine.pos.group,
+                "d": engine.d, "stop_at": r.stop_at, "converged_round": r.converged_round} if cfg.is_admm else {}),
             "neighbours": [{"id": n.id, "url": n.url, "last_send": r.neighbour_status.get(n.id)} for n in cfg.neighbours],
             "run_id": r.run_id,
             "run_state": r.state,
@@ -199,19 +207,50 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
                      receiver=cfg.node_id, detail={"reason": "sender is not a configured neighbour"})
             raise HTTPException(403, detail=f"{sender} is not a neighbour of {cfg.node_id}")
         dtype = h.get(wire.H_DTYPE, "float64")
-        if dtype not in wire.DTYPES:
-            raise HTTPException(400, detail=f"unsupported dtype {dtype}")
+        if dtype != engine.dtype:
+            raise HTTPException(400, detail=f"unsupported dtype {dtype}: {cfg.node_id} runs {engine.label}")
+        try:
+            seq = int(h[wire.H_SEQ]) if cfg.is_admm else None
+        except (KeyError, ValueError):
+            raise HTTPException(400, detail="missing or invalid sequence header")
         body = await request.body()
         claimed = h.get(wire.H_CHECKSUM, "")
         actual = wire.checksum(body)
         verified = claimed == actual
+        if not verified:
+            db.audit(node_id=cfg.node_id, event="update_received", run_id=run_id, round_num=round_num, sender=sender,
+                     receiver=cfg.node_id, payload_bytes=len(body), checksum=actual,
+                     detail={"verified": False, "dtype": dtype, "engine": engine.label})
+            raise HTTPException(400, detail="checksum mismatch")
+        upd = NeighborUpdate(sender=sender, round=round_num, body=body, checksum=actual, dtype=dtype, seq=seq,
+                             base=h.get(wire.H_BASE) or None, produces=h.get(wire.H_PRODUCES) or None)
+        answer = await runner().receive(run_id, upd, {k: h[k] for k in (wire.H_VIEW, wire.H_STOP) if h.get(k)})
         db.audit(node_id=cfg.node_id, event="update_received", run_id=run_id, round_num=round_num, sender=sender,
                  receiver=cfg.node_id, payload_bytes=len(body), checksum=actual,
-                 detail={"verified": verified, "dtype": dtype, "engine": engine.label})
-        if not verified:
-            raise HTTPException(400, detail="checksum mismatch")
-        upd = NeighborUpdate(sender=sender, round=round_num, body=body, checksum=actual, dtype=dtype)
-        participating = await runner().receive(run_id, upd)
-        return {"accepted": True, "participating": participating, "node_id": cfg.node_id}
+                 detail={"verified": True, "dtype": dtype, "engine": engine.label,
+                         **({"seq": seq, "on_time": answer["on_time"]} if cfg.is_admm else {})})
+        return {"accepted": True, **answer, "node_id": cfg.node_id}
+
+    @app.get("/snapshot", dependencies=peer_only)
+    async def snapshot(requester: str, rejoin_round: int | None = None):
+        """A neighbour's one-off full resync: my theta_hat (plus its mirror and our edge's lambda). Never data."""
+        if not cfg.is_admm:
+            raise HTTPException(404, detail=f"{engine.label} keeps no theta_hat snapshot")
+        if cfg.neighbour(requester) is None:
+            raise HTTPException(403, detail=f"{requester} is not a neighbour of {cfg.node_id}")
+        from .qgadmm.engine import snapshot_body
+
+        snap = await asyncio.to_thread(engine.snapshot_for, requester)
+        body = snapshot_body(snap)
+        r = runner()
+        if rejoin_round is not None:
+            r.note_rejoin(requester, rejoin_round)
+        db.audit(node_id=cfg.node_id, event="snapshot_served", run_id=r.run_id, round_num=r.current_round,
+                 sender=cfg.node_id, receiver=requester, payload_bytes=len(body), checksum=wire.checksum(body),
+                 detail={"seq": snap["seq"], "rejoin_round": rejoin_round, "engine": engine.label,
+                         "contents": "theta_hat, my mirror of the requester, our edge's lambda (model state only)"})
+        return Response(content=body, media_type="application/octet-stream",
+                        headers={wire.H_SEQ: str(snap["seq"]), wire.H_MIRROR_SEQ: str(snap["mirror_seq"]),
+                                 wire.H_CHECKSUM: wire.checksum(body)})
 
     return app

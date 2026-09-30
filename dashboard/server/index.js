@@ -1,5 +1,6 @@
 // MedChain dashboard server: serves the built UI, pushes read-only snapshots of
-// Postgres over a WebSocket, and relays the two buttons (start / pause) to a
+// Postgres over a WebSocket (plus one "update" event per logged /update send),
+// and relays the two buttons (start / pause) to a
 // hospital node as a one-shot request. Training is coordinated peer-to-peer by
 // the nodes; killing this process does not affect it.
 
@@ -9,11 +10,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { WebSocketServer } from "ws";
-import { buildSnapshot, STALE_AFTER_S } from "./snapshot.js";
+import { buildSnapshot, latestUpdateId, STALE_AFTER_S, updatesSince } from "./snapshot.js";
 
 const PORT = Number(process.env.PORT || 8080);
 const DIST = process.env.DASHBOARD_DIST || fileURLToPath(new URL("../dist", import.meta.url));
 const TICK_MS = Number(process.env.SNAPSHOT_INTERVAL_MS || 1000);
+const UPDATES_TICK_MS = Number(process.env.UPDATES_INTERVAL_MS || 250);
 const SHARED_SECRET = process.env.MEDCHAIN_SHARED_SECRET || "";
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
@@ -121,5 +123,29 @@ wss.on("connection", async (ws) => {
   }
 });
 
+// One "update" event per POST /update, as soon as the sending node logs it to updates_meta.
+let lastUpdateId = null;
+let polling = false;
+async function tickUpdates() {
+  if (polling) return;
+  polling = true;
+  try {
+    if (lastUpdateId === null || wss.clients.size === 0) {
+      lastUpdateId = await latestUpdateId(pool); // never replay history, only new sends
+      return;
+    }
+    const rows = await updatesSince(pool, lastUpdateId);
+    if (!rows.length) return;
+    lastUpdateId = rows[rows.length - 1].id;
+    const msg = JSON.stringify({ type: "update", data: rows });
+    for (const ws of wss.clients) if (ws.readyState === ws.OPEN) ws.send(msg);
+  } catch (err) {
+    console.warn("update events failed:", err.message);
+  } finally {
+    polling = false;
+  }
+}
+
 setInterval(tick, TICK_MS);
+setInterval(tickUpdates, UPDATES_TICK_MS);
 server.listen(PORT, () => console.log(`medchain dashboard (observer) on :${PORT}`));

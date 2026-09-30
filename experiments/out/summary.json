@@ -1,0 +1,231 @@
+{
+  "config": {
+    "chain": [
+      "hospital-a",
+      "hospital-b",
+      "hospital-c"
+    ],
+    "rho": 24.0,
+    "alpha": 1.0,
+    "local_epochs": 50,
+    "lr": 0.01,
+    "epsilon": 0.001,
+    "rounds": 200
+  },
+  "centralized_loss": 0.4225781182460251,
+  "engines": {
+    "gossip": {
+      "label": "naive gossip baseline",
+      "d": 16,
+      "rounds_run": 200,
+      "converged_at": null,
+      "final_loss": 0.42229507445962544,
+      "total_bytes": 102400,
+      "final_disagreement": 0.0685047577985608,
+      "bytes_per_message": 128.0
+    },
+    "gadmm_fp": {
+      "label": "GADMM full precision (float32 deltas)",
+      "d": 16,
+      "rounds_run": 32,
+      "converged_at": 32,
+      "final_loss": 0.4232514231729396,
+      "total_bytes": 9216,
+      "final_disagreement": 0.000857235621247803,
+      "bytes_per_message": 72.0
+    },
+    "qgadmm_b8": {
+      "label": "Q-GADMM (b=8)",
+      "d": 16,
+      "rounds_run": 35,
+      "converged_at": 35,
+      "final_loss": 0.42310282191368837,
+      "total_bytes": 3360,
+      "final_disagreement": 0.0008699843466633916,
+      "bytes_per_message": 24.0
+    },
+    "qgadmm_b4": {
+      "label": "Q-GADMM (b=4)",
+      "d": 16,
+      "rounds_run": 87,
+      "converged_at": 87,
+      "final_loss": 0.42258669589755826,
+      "total_bytes": 5568,
+      "final_disagreement": 0.0009697570102088325,
+      "bytes_per_message": 16.0
+    },
+    "qgadmm_b2": {
+      "label": "Q-GADMM (b=2)",
+      "d": 16,
+      "rounds_run": 159,
+      "converged_at": 159,
+      "final_loss": 0.4225802569958294,
+      "total_bytes": 7632,
+      "final_disagreement": 0.0006906037209065851,
+      "bytes_per_message": 12.0
+    }
+  },
+  "payload_ratio_vs_32bit": {
+    "measured_d16_b2": 5.333333333333333,
+    "by_bits": {
+      "2": [
+        {
+          "d": 16,
+          "packet_bytes": 12,
+          "ref32_bytes": 64,
+          "ratio": 5.333333333333333
+        },
+        {
+          "d": 64,
+          "packet_bytes": 24,
+          "ref32_bytes": 256,
+          "ratio": 10.666666666666666
+        },
+        {
+          "d": 256,
+          "packet_bytes": 72,
+          "ref32_bytes": 1024,
+          "ratio": 14.222222222222221
+        },
+        {
+          "d": 1024,
+          "packet_bytes": 264,
+          "ref32_bytes": 4096,
+          "ratio": 15.515151515151516
+        },
+        {
+          "d": 4096,
+          "packet_bytes": 1032,
+          "ref32_bytes": 16384,
+          "ratio": 15.875968992248062
+        },
+        {
+          "d": 16384,
+          "packet_bytes": 4104,
+          "ref32_bytes": 65536,
+          "ratio": 15.968810916179336
+        },
+        {
+          "d": 65536,
+          "packet_bytes": 16392,
+          "ref32_bytes": 262144,
+          "ratio": 15.99219131283553
+        }
+      ],
+      "4": [
+        {
+          "d": 16,
+          "packet_bytes": 16,
+          "ref32_bytes": 64,
+          "ratio": 4.0
+        },
+        {
+          "d": 64,
+          "packet_bytes": 40,
+          "ref32_bytes": 256,
+          "ratio": 6.4
+        },
+        {
+          "d": 256,
+          "packet_bytes": 136,
+          "ref32_bytes": 1024,
+          "ratio": 7.529411764705882
+        },
+        {
+          "d": 1024,
+          "packet_bytes": 520,
+          "ref32_bytes": 4096,
+          "ratio": 7.876923076923077
+        },
+        {
+          "d": 4096,
+          "packet_bytes": 2056,
+          "ref32_bytes": 16384,
+          "ratio": 7.968871595330739
+        },
+        {
+          "d": 16384,
+          "packet_bytes": 8200,
+          "ref32_bytes": 65536,
+          "ratio": 7.9921951219512195
+        },
+        {
+          "d": 65536,
+          "packet_bytes": 32776,
+          "ref32_bytes": 262144,
+          "ratio": 7.998047351720771
+        }
+      ],
+      "8": [
+        {
+          "d": 16,
+          "packet_bytes": 24,
+          "ref32_bytes": 64,
+          "ratio": 2.6666666666666665
+        },
+        {
+          "d": 64,
+          "packet_bytes": 72,
+          "ref32_bytes": 256,
+          "ratio": 3.5555555555555554
+        },
+        {
+          "d": 256,
+          "packet_bytes": 264,
+          "ref32_bytes": 1024,
+          "ratio": 3.878787878787879
+        },
+        {
+          "d": 1024,
+          "packet_bytes": 1032,
+          "ref32_bytes": 4096,
+          "ratio": 3.9689922480620154
+        },
+        {
+          "d": 4096,
+          "packet_bytes": 4104,
+          "ref32_bytes": 16384,
+          "ratio": 3.992202729044834
+        },
+        {
+          "d": 16384,
+          "packet_bytes": 16392,
+          "ref32_bytes": 65536,
+          "ratio": 3.9980478282088825
+        },
+        {
+          "d": 65536,
+          "packet_bytes": 65544,
+          "ref32_bytes": 262144,
+          "ratio": 3.9995117783473697
+        }
+      ]
+    }
+  },
+  "rho_sweep_b2": {
+    "5.0": {
+      "converged_at": 69,
+      "final_loss": 0.42257591291304203,
+      "final_max_residual": 0.0005793607611629421,
+      "total_bytes": 3312
+    },
+    "15.0": {
+      "converged_at": 127,
+      "final_loss": 0.422576188788086,
+      "final_max_residual": 0.0007072249847483442,
+      "total_bytes": 6096
+    },
+    "24.0": {
+      "converged_at": 159,
+      "final_loss": 0.4225802569958294,
+      "final_max_residual": 0.0006906037209065851,
+      "total_bytes": 7632
+    },
+    "50.0": {
+      "converged_at": 246,
+      "final_loss": 0.42257672409260655,
+      "final_max_residual": 0.0006679076194000939,
+      "total_bytes": 11808
+    }
+  }
+}

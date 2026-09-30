@@ -14,11 +14,45 @@ def test_three_hospital_configs_load():
     assert len({c.node_id for c in cfgs}) == 3
     assert len({c.port for c in cfgs}) == 3
     for c in cfgs:
-        assert c.engine == "gossip-baseline"
-        assert c.bits == 64, "the naive gossip baseline sends float64; bits must say so"
-        assert c.training.rounds == 20
+        assert c.engine == "qgadmm"
+        assert (c.rho, c.alpha, c.bits, c.local_epochs, c.lr, c.epsilon, c.checkpoint_every) == (
+            24.0, 1.0, 2, 50, 0.01, 0.001, 5)
+        assert c.seed == 42 and c.checkpoint_dir == "/checkpoints"
+        assert c.training.rounds == 200
         assert c.timing.heartbeat_interval_s == 5
     assert len({c.shared_secret for c in cfgs}) == 1, "all nodes must share one secret"
+    assert len({c.chain for c in cfgs}) == 1, "all nodes must agree on the chain order"
+
+
+def test_chain_order_matches_the_neighbour_links():
+    cfgs = {c.node_id: c for c in (load_config(p) for p in CONFIGS)}
+    chain = next(iter(cfgs.values())).chain
+    assert set(chain) == set(cfgs)
+    for i, node in enumerate(chain):
+        adjacent = {chain[j] for j in (i - 1, i + 1) if 0 <= j < len(chain)}
+        assert {n.id for n in cfgs[node].neighbours} == adjacent
+
+
+def base_yaml(tmp_path, body):
+    p = tmp_path / "c.yaml"
+    p.write_text("node_id: b\nport: 1\ndata_slice: s.csv\nshared_secret: s\n" + body)
+    return p
+
+
+def test_admm_engines_need_a_consistent_chain(tmp_path):
+    nb = "neighbours:\n  - id: a\n    url: http://a:1\n  - id: c\n    url: http://c:1\n"
+    with pytest.raises(ValueError, match="chain"):
+        load_config(base_yaml(tmp_path, "engine: qgadmm\n" + nb))
+    with pytest.raises(ValueError, match="chain neighbours"):
+        load_config(base_yaml(tmp_path, "engine: qgadmm\nchain: [a, c, b]\n" + nb))
+    ok = load_config(base_yaml(tmp_path, "engine: gadmm_fp\nchain: [a, b, c]\n" + nb))
+    assert ok.is_admm and ok.chain == ("a", "b", "c")
+    # the gossip baseline does not need a chain; only the three engine names load
+    gossip = load_config(base_yaml(tmp_path, "engine: gossip\n" + nb))
+    assert gossip.engine == "gossip" and not gossip.is_admm
+    for name in ("gossip-baseline", "sgd"):
+        with pytest.raises(ValueError, match="unknown engine"):
+            load_config(base_yaml(tmp_path, f"engine: {name}\n" + nb))
 
 
 def test_neighbour_links_are_symmetric_and_resolve():

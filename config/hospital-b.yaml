@@ -5,7 +5,10 @@ display_name: Hospital B
 port: 8002
 advertise_url: http://hospital-b:8002
 
-# Chain topology A - B - C (the layout Q-GADMM expects in a later phase).
+# Chain topology A - B - C. `chain` is the node order 1..N for the ADMM engines:
+# odd positions are the HEAD group, even the TAIL group; neighbours must be exactly
+# my chain neighbours.
+chain: [hospital-a, hospital-b, hospital-c]
 neighbours:
   - id: hospital-a
     url: http://hospital-a:8001
@@ -13,30 +16,38 @@ neighbours:
     url: http://hospital-c:8003
 
 # Pre-shared secret every peer (and the dashboard relay) sends in the
-# X-MedChain-Secret header on /update and /round/*. Same value on all nodes.
+# X-MedChain-Secret header on /update, /snapshot and /round/*. Same value on all nodes.
 shared_secret: medchain-demo-secret
 
 # Only this hospital's own slice is mounted into its container.
 data_slice: /data/hospital-b.csv
 
-# Training engine. The only engine today is the naive gossip baseline:
-# plain neighbour weight averaging.
-engine: gossip-baseline
+# Training engine:
+#   qgadmm    Q-GADMM (Elgabli et al., IEEE Trans. Commun. 2021): stochastic b-bit
+#             quantized differences, head/tail group ADMM on the chain
+#   gadmm_fp  full-precision GADMM: same algorithm, quantization skipped (raw float32 deltas)
+#   gossip    the naive gossip baseline: plain neighbour weight averaging, float64
+#             weights (ignores rho, bits and the ADMM settings below)
+engine: qgadmm
 
-# Reserved for the ADMM-based engine (Q-GADMM) in a later phase. The naive gossip
-# baseline ignores rho and always sends full-precision float64 weights, so bits
-# must stay 64 until quantization lands.
-rho: 1.0
-bits: 64
+# ADMM settings (qgadmm / gadmm_fp)
+rho: 24.0             # penalty; the {5, 15, 24, 50} sweep is in experiments/compare_engines.py
+alpha: 1.0            # dual step scale (1.0 for logistic regression; 0.01 reserved for DNNs)
+bits: 2               # qgadmm bits per coordinate: 2, 4 or 8
+local_epochs: 50      # full-batch Adam steps per primal step (E=5 never reaches consensus here)
+lr: 0.01              # Adam learning rate
+epsilon: 0.001        # consensus: max edge residual below this for 3 consecutive rounds
+checkpoint_every: 5   # rounds between checkpoints to /checkpoints (a docker volume)
+seed: 42              # + chain position: this node's quantizer / shuffling RNG
 
 training:
-  rounds: 20
-  local_epochs: 2
-  learning_rate: 0.005
+  rounds: 200         # round limit (the ADMM engines stop earlier once consensus is reached)
+  local_epochs: 2     # gossip baseline only (scikit-learn SGD epochs per round)
+  learning_rate: 0.005  # gossip baseline only
   test_fraction: 0.25
   seed: 7
 
 timing:
   heartbeat_interval_s: 5
   round_timeout_s: 6
-  round_pause_s: 1.0
+  round_pause_s: 0.2

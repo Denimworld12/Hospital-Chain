@@ -1,5 +1,9 @@
 """Postgres writes: nodes, runs, rounds, updates_meta, metrics, audit_logs.
 
+The only schema addition since the MVP is the nullable metrics.residuals column
+(per-edge primal residuals, written by the ADMM engines; the gossip baseline
+writes NULL). It is added in place, so an existing database upgrades on start.
+
 Nodes are the only writers. The dashboard reads these tables and never writes
 them. Writes are best-effort: a database outage is logged and training carries
 on, because the database is an observation channel, not a coordinator.
@@ -88,6 +92,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     checksum      TEXT,
     detail        JSONB NOT NULL DEFAULT '{}'
 );
+-- ADMM engines: per-edge primal residuals for the round (NULL for the gossip baseline)
+ALTER TABLE metrics ADD COLUMN IF NOT EXISTS residuals JSONB;
 """
 
 SCHEMA_LOCK_KEY = 4242_0001
@@ -192,11 +198,12 @@ class Database:
         )
 
     def record_metrics(self, *, run_id: str, node_id: str, round_num: int, loss: float, accuracy: float,
-                       train_loss: float, n_train: int, n_test: int) -> None:
+                       train_loss: float, n_train: int, n_test: int, residuals: dict | None = None) -> None:
         self._execute(
-            """INSERT INTO metrics (run_id, node_id, round, loss, accuracy, train_loss, n_train, n_test)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (run_id, node_id, round) DO NOTHING""",
-            (run_id, node_id, round_num, loss, accuracy, train_loss, n_train, n_test),
+            """INSERT INTO metrics (run_id, node_id, round, loss, accuracy, train_loss, n_train, n_test, residuals)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) ON CONFLICT (run_id, node_id, round) DO NOTHING""",
+            (run_id, node_id, round_num, loss, accuracy, train_loss, n_train, n_test,
+             None if residuals is None else json.dumps(residuals)),
         )
 
     def audit(self, *, node_id: str, event: str, run_id: str | None = None, round_num: int | None = None,

@@ -1,57 +1,107 @@
 import networkChain from "@assets/network-chain.svg";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from "recharts";
-import { Eyebrow, Illustration, SectionHeading, formatBytes } from "../components/ui.jsx";
+import { EngineChip, Eyebrow, Illustration, SectionHeading, engineInfo, formatBytes } from "../components/ui.jsx";
 
 const axis = { stroke: "var(--color-ink-black)", strokeWidth: 1 };
 const tick = { fill: "var(--color-ink-black)", fontSize: 12, fontFamily: "var(--font-body)" };
+const ratio = (a, b) => (a > 0 && b > 0 ? (a / b).toFixed(1) : "-");
+
+function EngineNote({ family, bits, d }) {
+  const dims = d ? `d = ${d}` : "this model";
+  if (family === "qgadmm")
+    return (
+      <p className="note">
+        Q-GADMM sends {bits} bits per coordinate plus an 8-byte header (b, R) per packet. At {dims} that header
+        dominates, so a packet is about {ratio(4 * (d || 0), Math.ceil((bits * (d || 0)) / 8) + 8)}x smaller than the
+        32-bit reference; the coordinates alone are {32 / bits}x smaller. The per-packet ratio approaches {32 / bits}x as
+        models grow (experiments/compare_engines.py).
+      </p>
+    );
+  if (family === "gadmm_fp")
+    return (
+      <p className="note">
+        Full-precision GADMM sends each difference as raw float32 plus the same 8-byte header, so it costs slightly more
+        than the 32-bit reference. It is the b = infinity reference for Q-GADMM.
+      </p>
+    );
+  return (
+    <p className="note">
+      The naive gossip baseline sends every weight as a full float64, twice the 32-bit reference. It does not quantize.
+    </p>
+  );
+}
 
 export default function Communication({ snapshot }) {
   const c = snapshot?.comm || {};
+  const label = snapshot?.engine || "naive gossip baseline";
+  const { family, bits } = engineInfo(label);
   const sent = c.bytes_this_round || 0;
-  const full = c.full_precision_bytes_this_round || 0;
-  const max = Math.max(sent, full, 1);
+  const ref = c.ref32_bytes_this_round || 0;
+  const max = Math.max(sent, ref, 1);
+  const admm = family !== "gossip";
   return (
     <section className="section">
       <div className="page">
-        <SectionHeading eyebrow="Weights only, never patient rows" title="Communication" tagline="what actually crosses the wire" />
+        <SectionHeading eyebrow="Model updates only, never patient rows" title="Communication" tagline="what actually crosses the wire" />
+        <div className="comm-engine">
+          <EngineChip label={label} />
+        </div>
         <div className="comm-grid">
           <div className="comm-counter-wrap">
             <Eyebrow>Bytes sent this round{c.round ? ` - round ${c.round}` : ""}</Eyebrow>
             <div className="card comm-counter">
               <p className="display-number" data-testid="bytes-this-round">{formatBytes(sent)}</p>
-              <p className="comm-counter__unit">bytes across {c.messages_this_round || 0} weight updates</p>
+              <p className="comm-counter__unit">bytes across {c.messages_this_round || 0} updates (measured payload)</p>
               {c.failed_this_round > 0 && (
                 <p className="comm-counter__failed">
                   {c.failed_this_round} send{c.failed_this_round === 1 ? "" : "s"} to unreachable neighbours this round (0 bytes delivered)
                 </p>
               )}
               <p className="comm-counter__total">
-                Total this run: <strong>{formatBytes(c.total_bytes || 0)}</strong> bytes
+                Total this run: <strong data-testid="bytes-total">{formatBytes(c.total_bytes || 0)}</strong> bytes in{" "}
+                {formatBytes(c.messages_total || 0)} updates
               </p>
             </div>
           </div>
           <div className="comm-bars-wrap">
-            <Eyebrow>Full precision vs actually sent</Eyebrow>
+            <Eyebrow>32-bit reference vs actually sent</Eyebrow>
             <div className="card comm-bars">
               <div className="bar-row">
-                <span className="bar-row__label">Full precision would cost</span>
+                <span className="bar-row__label">32-bit would cost</span>
                 <span className="bar-row__track">
-                  <span className="bar-row__bar bar-row__bar--full" style={{ width: `${(full / max) * 100}%` }} />
+                  <span className="bar-row__bar bar-row__bar--full" style={{ width: `${(ref / max) * 100}%` }} />
                 </span>
-                <span className="bar-row__value">{formatBytes(full)} B</span>
+                <span className="bar-row__value" data-testid="ref32-this-round">{formatBytes(ref)} B</span>
               </div>
               <div className="bar-row">
-                <span className="bar-row__label">Actually sent</span>
+                <span className="bar-row__label">We sent</span>
                 <span className="bar-row__track">
                   <span className="bar-row__bar bar-row__bar--sent" style={{ width: `${(sent / max) * 100}%` }} />
                 </span>
                 <span className="bar-row__value">{formatBytes(sent)} B</span>
               </div>
-              <p className="note">
-                The naive gossip baseline sends every weight as a full-precision float64, so the two bars
-                are equal today. Quantization arrives with Q-GADMM in a later phase; that is what will
-                shrink the gold bar.
+              <p className="comm-ratio" data-testid="comm-ratio">
+                Whole run: 32-bit would cost <strong>{formatBytes(c.ref32_total_bytes || 0)} B</strong> (4 x d = {c.d ?? "-"}{" "}
+                parameters x {formatBytes(c.messages_total || 0)} messages); we sent <strong>{formatBytes(c.total_bytes || 0)} B</strong>
+                {c.total_bytes > 0 && (
+                  <>
+                    {" "}={" "}
+                    {c.ref32_total_bytes >= c.total_bytes ? (
+                      <><strong>{ratio(c.ref32_total_bytes, c.total_bytes)}x</strong> less</>
+                    ) : (
+                      <><strong>{ratio(c.total_bytes, c.ref32_total_bytes)}x</strong> more</>
+                    )}
+                  </>
+                )}
+                .
+                {admm && c.coordinate_bytes_total > 0 && (
+                  <>
+                    {" "}Coordinates alone, without the 8-byte header: {formatBytes(c.coordinate_bytes_total)} B ={" "}
+                    {ratio(c.ref32_total_bytes, c.coordinate_bytes_total)}x less.
+                  </>
+                )}
               </p>
+              <EngineNote family={family} bits={bits} d={c.d} />
             </div>
           </div>
         </div>
@@ -63,7 +113,7 @@ export default function Communication({ snapshot }) {
               <YAxis axisLine={axis} tickLine={axis} tick={tick} width={56} />
               <Tooltip cursor={{ fill: "rgba(255, 196, 0, 0.12)" }} contentStyle={{ border: "1px solid #000", borderRadius: 8, fontFamily: "var(--font-body)" }} />
               <Legend wrapperStyle={{ fontFamily: "var(--font-label)", fontSize: 12, letterSpacing: "0.133em", textTransform: "uppercase" }} />
-              <Bar dataKey="full_precision_bytes" name="Full precision would cost" fill="var(--mc-bar-full)" isAnimationActive={false} />
+              <Bar dataKey="ref32_bytes" name="32-bit would cost" fill="var(--mc-bar-full)" isAnimationActive={false} />
               <Bar dataKey="bytes" name="Actually sent" fill="var(--mc-bar-sent)" isAnimationActive={false} />
             </BarChart>
           </ResponsiveContainer>
