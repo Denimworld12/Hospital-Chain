@@ -85,8 +85,12 @@ export default function Communication({ snapshot }) {
                 parameters x {formatBytes(c.messages_total || 0)} messages); we sent <strong>{formatBytes(c.total_bytes || 0)} B</strong>
                 {c.total_bytes > 0 && (
                   <>
-                    {" "}= <strong>{ratio(c.ref32_total_bytes, c.total_bytes)}x</strong>{" "}
-                    {c.ref32_total_bytes >= c.total_bytes ? "less" : "more"}
+                    {" "}={" "}
+                    {c.ref32_total_bytes >= c.total_bytes ? (
+                      <><strong>{ratio(c.ref32_total_bytes, c.total_bytes)}x</strong> less</>
+                    ) : (
+                      <><strong>{ratio(c.total_bytes, c.ref32_total_bytes)}x</strong> more</>
+                    )}
                   </>
                 )}
                 .

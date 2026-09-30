@@ -269,7 +269,10 @@ def test_training_run_completes_and_is_audited():
 @gossip_only
 def test_kill_node_turns_orange_and_survivors_keep_training():
     wait_idle()
-    run_id = start_via_dashboard(GOSSIP_ROUNDS)
+    # long enough that the run outlasts the heartbeat-based down detection (~7s) and the survivors are
+    # still visibly training afterwards (a round takes ~0.2s with the configured round_pause_s)
+    rounds = 100
+    run_id = start_via_dashboard(rounds)
     survivors = [n for n in NODES if n != KILL_NODE]
     wait_until(lambda: all(rounds_done(n, run_id) >= 3 for n in NODES), 60, what="3 rounds before the kill")
     try:
@@ -284,7 +287,8 @@ def test_kill_node_turns_orange_and_survivors_keep_training():
         assert took <= 10, f"{KILL_NODE} took {took:.1f}s to turn orange"
         at_kill = {n: rounds_done(n, run_id) for n in survivors}
 
-        wait_until(lambda: all(rounds_done(n, run_id) == GOSSIP_ROUNDS for n in survivors), 150, what="survivors finish the run")
+        assert all(at_kill[n] < rounds for n in survivors), f"run finished before the kill was detected: {at_kill}"
+        wait_until(lambda: all(rounds_done(n, run_id) == rounds for n in survivors), 150, what="survivors finish the run")
         for n in survivors:
             assert rounds_done(n, run_id) > at_kill[n], f"{n} stopped training after the kill"
             assert metrics(n)["run_state"] == "completed"
