@@ -1,0 +1,7 @@
+.git
+.venv
+.claude
+**/node_modules
+**/__pycache__
+dashboard/dist
+tests
