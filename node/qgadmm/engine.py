@@ -218,6 +218,9 @@ class QGADMMEngine(Engine):
                     raise ValueError(f"update from {u.sender}, which is not a chain neighbour of {self.pos.node_id}")
                 mirror = self.state.mirrors[u.sender]
                 have = fingerprint(mirror)
+                if u.seq is not None and u.seq <= self.state.mirror_seq[u.sender]:
+                    duplicate.append(u.sender)  # already reflected (e.g. overtaken by a snapshot resync)
+                    continue
                 if u.produces and have == u.produces:
                     duplicate.append(u.sender)
                     continue
@@ -260,7 +263,8 @@ class QGADMMEngine(Engine):
     def evaluate(self) -> Evaluation:
         with self.lock:
             theta = self.state.theta
-        z = self.X_test @ theta[:-1] + theta[-1]
+        with np.errstate(all="ignore"):  # spurious macOS Accelerate matmul warnings (see node/trainer.py)
+            z = self.X_test @ theta[:-1] + theta[-1]
         if self.task == LOGISTIC:
             p = np.clip(1.0 / (1.0 + np.exp(-np.clip(z, -30, 30))), 1e-15, 1 - 1e-15)
             y = self.y_test

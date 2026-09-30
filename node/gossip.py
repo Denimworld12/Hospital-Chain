@@ -1,11 +1,11 @@
 """Naive gossip baseline: plain neighbour weight averaging.
 
-This is a placeholder engine and is labelled as such everywhere: each round a
+This is the comparison baseline and is labelled as such everywhere: each round a
 node trains locally, sends its full-precision weights to its neighbours, then
 replaces its weights with the uniform average of its own and whatever neighbour
-weights arrived. No ADMM, no dual variables, no quantization; `rho` is ignored
-and weights always travel as float64. Q-GADMM replaces it in a later phase
-behind the Engine interface (node/engine.py).
+weights arrived. No ADMM, no dual variables, no quantization; `rho` and `bits` are
+ignored and weights always travel as float64. It stays selectable next to Q-GADMM
+(node/qgadmm/) behind the Engine interface (node/engine.py): `engine: gossip`.
 """
 
 from __future__ import annotations
@@ -22,14 +22,14 @@ LABEL = "naive gossip baseline"
 
 
 class GossipBaselineEngine(Engine):
-    name = "gossip-baseline"
+    name = "gossip"
     label = LABEL
 
     def __init__(self, trainer: LocalTrainer, *, bits: int = 64):
         if bits != 64:
             raise ValueError(
-                f"the {LABEL} sends full-precision float64 weights only; set bits: 64 (got {bits}). "
-                "Quantization arrives with the Q-GADMM engine in a later phase."
+                f"the {LABEL} sends full-precision float64 weights only (got bits={bits}); "
+                "quantization is the Q-GADMM engine (engine: qgadmm)."
             )
         self.trainer = trainer
         self.dtype = "float64"
@@ -68,9 +68,3 @@ class GossipBaselineEngine(Engine):
         t = self.trainer
         return Evaluation(loss=t.loss(t.X_test, t.y_test), accuracy=t.accuracy(t.X_test, t.y_test), n_test=len(t.y_test))
 
-
-def build_engine(name: str, trainer: LocalTrainer, *, bits: int, rho: float) -> Engine:
-    """Engine registry. Add the ADMM-based engine here when it lands."""
-    if name == GossipBaselineEngine.name:
-        return GossipBaselineEngine(trainer, bits=bits)
-    raise ValueError(f"unknown engine {name!r}; available: {GossipBaselineEngine.name}")

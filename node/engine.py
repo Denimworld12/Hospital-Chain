@@ -7,9 +7,10 @@ A node's round loop (node/runner.py) only talks to an Engine:
     3. apply_neighbor_update(us)  - fold in the updates received this round
     4. evaluate()                 - metrics on the local held-out split
 
-The current implementation is the naive gossip baseline (node/gossip.py). A real
-ADMM-based engine (Q-GADMM) replaces it in a later phase behind this same
-interface; select it with `engine:` in the node config.
+Implementations (node/engines.py picks one from `engine:` in the node config):
+the naive gossip baseline (node/gossip.py), and Q-GADMM / full-precision GADMM
+(node/qgadmm/engine.py), whose head/tail round loop lives in
+node/qgadmm/scheduler.py.
 """
 
 from __future__ import annotations

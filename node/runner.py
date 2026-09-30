@@ -18,6 +18,7 @@ import logging
 import secrets
 import time
 from dataclasses import asdict, dataclass
+from typing import Mapping
 
 import httpx
 
@@ -39,6 +40,9 @@ class RoundMetrics:
     train_loss: float
     neighbours_heard: int
     neighbours_expected: int
+    # ADMM engines only
+    max_residual: float | None = None
+    degraded: bool = False
 
 
 def new_run_id() -> str:
@@ -70,18 +74,27 @@ class Runner:
     def active(self) -> bool:
         return self.state in ACTIVE
 
-    async def receive(self, run_id: str, update: NeighborUpdate) -> bool:
-        """Buffer a neighbour update. Returns whether this node is taking part in run_id."""
+    async def receive(self, run_id: str, update: NeighborUpdate, meta: Mapping[str, str] | None = None) -> dict:
+        """Buffer a neighbour update (`meta`: engine-specific headers; unused by the gossip baseline).
+
+        Returns {"participating": whether this node is taking part in run_id,
+        "on_time": whether the update will be counted in its round}.
+        """
         if run_id in self._finished_runs:
-            return False
+            return {"participating": False, "on_time": False}
         async with self._cond:
             self._inbox.setdefault((run_id, update.round), {})[update.sender] = update
             # keep the buffer bounded: drop stale rounds / other runs
             if len(self._inbox) > 64:
                 for key in sorted(self._inbox, key=lambda k: (k[0] != self.run_id, k[1]))[: len(self._inbox) - 64]:
                     self._inbox.pop(key, None)
+            on_time = self._on_time(run_id, update)
             self._cond.notify_all()
-        return self.active and run_id == self.run_id
+        participating = self.active and run_id == self.run_id
+        return {"participating": participating, "on_time": participating and on_time}
+
+    def _on_time(self, run_id: str, update: NeighborUpdate) -> bool:
+        return True
 
     def seen_op(self, op_id: str) -> bool:
         if op_id in self._seen_ops:
@@ -185,7 +198,14 @@ class Runner:
             self._finished_runs = (self._finished_runs + [run_id])[-32:]
             self.db.heartbeat(self.cfg.node_id, run_id, self.state, self.current_round)
 
-    async def _send(self, n: Neighbour, pkg: UpdatePackage, run_id: str, r: int) -> tuple[Neighbour, bool]:
+    async def _send(self, n: Neighbour, pkg: UpdatePackage, run_id: str, r: int,
+                    extra_headers: dict[str, str] | None = None) -> tuple[Neighbour, bool]:
+        n, participating, _ = await self._post_update(n, pkg, run_id, r, extra_headers)
+        return n, participating
+
+    async def _post_update(self, n: Neighbour, pkg: UpdatePackage, run_id: str, r: int,
+                           extra_headers: dict[str, str] | None = None) -> tuple[Neighbour, bool, bool]:
+        """POST one update; returns (neighbour, participating, on_time) and logs it to updates_meta."""
         headers = {
             wire.H_RUN: run_id,
             wire.H_ROUND: str(r),
@@ -194,13 +214,16 @@ class Runner:
             wire.H_DTYPE: pkg.dtype,
             wire.H_SECRET: self.cfg.shared_secret,
             "Content-Type": "application/octet-stream",
+            **(extra_headers or {}),
         }
-        participating = False
+        participating = on_time = False
         try:
             resp = await self.client.post(f"{n.url}/update", content=pkg.body, headers=headers)
             if resp.status_code == 200:
                 status = "delivered"
-                participating = bool(resp.json().get("participating"))
+                answer = resp.json()
+                participating = bool(answer.get("participating"))
+                on_time = bool(answer.get("on_time", participating))
             else:
                 status = f"rejected-{resp.status_code}"
         except httpx.HTTPError as exc:
@@ -214,7 +237,7 @@ class Runner:
         if status != "delivered":
             self.db.audit(node_id=self.cfg.node_id, event="neighbour_unreachable" if status == "unreachable" else "update_rejected",
                           run_id=run_id, round_num=r, sender=self.cfg.node_id, receiver=n.id, detail={"status": status})
-        return n, participating
+        return n, participating, on_time
 
     async def _collect(self, run_id: str, r: int, expected: set[str]) -> dict[str, NeighborUpdate]:
         loop = asyncio.get_running_loop()
