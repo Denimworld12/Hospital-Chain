@@ -1,5 +1,5 @@
 import { ResidualChart } from "./Charts.jsx";
-import { Eyebrow, Pill } from "./ui.jsx";
+import { Eyebrow, Pill, engineInfo } from "./ui.jsx";
 
 const sci = (v) => (v == null ? "-" : Number(v).toExponential(2));
 
@@ -8,6 +8,7 @@ const sci = (v) => (v == null ? "-" : Number(v).toExponential(2));
 export default function ConsensusPanel({ snapshot }) {
   const c = snapshot?.consensus || { edges: [] };
   const total = snapshot?.run?.total_rounds || 20;
+  const gossip = engineInfo(snapshot?.engine).family === "gossip";
   return (
     <div className="consensus" data-testid="consensus-panel">
       <Eyebrow>Disagreement between neighbours</Eyebrow>
@@ -24,6 +25,8 @@ export default function ConsensusPanel({ snapshot }) {
             </p>
             <ResidualChart series={c.series} edges={c.edges} epsilon={c.epsilon} totalRounds={total} />
           </>
+        ) : !gossip ? (
+          <p className="note">Waiting for the first round's residuals...</p>
         ) : (
           <p className="note">
             The naive gossip baseline has no consensus constraint and keeps no quantized snapshots, so it logs no
