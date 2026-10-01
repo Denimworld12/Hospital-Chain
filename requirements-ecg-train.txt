@@ -1,6 +1,7 @@
 # Offline only: retrain the ECG classifier (python -m node.assess.train_ecg).
 # Not needed to run a node or the tests; the exported ONNX model is committed.
+# torch comes from node/requirements.txt (the Q-GADMM engine pins it);
+# torchvision must be the release that matches that torch.
 -r node/requirements.txt
-torch==2.14.0
-torchvision==0.29.0
+torchvision==0.20.1
 onnx==1.23.1
