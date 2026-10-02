@@ -289,6 +289,152 @@ and it joins the next run you start.
 docker compose down        # add -v to also delete the Postgres data and checkpoints
 ```
 
+## Running on separate machines
+
+The compose file above runs all three hospitals on one machine. The protocol does
+not depend on that. A node needs exactly one thing from the network: an HTTP URL
+for each of its chain neighbours, plus the URL its neighbours use to reach it.
+Those URLs are configuration, not code, so the same image runs one hospital per
+laptop with no code change.
+
+**Use a private mesh network.** We recommend [Tailscale](https://tailscale.com) on
+every hospital machine (any WireGuard-style overlay works). It connects machines
+behind home and hospital NAT without port forwarding, it encrypts every packet
+between them, and it gives each machine a stable name such as
+`hospital-b.tail1234.ts.net`. MedChain adds no TLS of its own. Its authentication
+is the shared-secret header (`X-MedChain-Secret`), and it relies on the network
+layer for encryption, much as NVIDIA FLARE relies on TLS at the transport layer.
+Do not expose node ports to the public internet. A kit's `--bind-ip` publishes the
+port on one address only, for example the machine's Tailscale IP.
+
+### Provision one kit per hospital
+
+`scripts/provision.py` follows NVIDIA FLARE's "startup kit" idea. It writes one
+self-contained folder (and optionally a zip) per hospital:
+
+```sh
+python scripts/provision.py --zip \
+  --peers hospital-a=http://hospital-a.tail1234.ts.net:8001,hospital-b=http://hospital-b.tail1234.ts.net:8002,hospital-c=http://hospital-c.tail1234.ts.net:8003 \
+  --observer-db postgresql://medchain:medchain@observer.tail1234.ts.net:5432/medchain   # optional
+```
+
+`--peers` lists every hospital in chain order, each with the address its
+neighbours reach it at: a LAN IP, a Tailscale name or a domain. Addresses must be
+`http://`; `https://` is rejected because the node serves plain HTTP. The command
+writes `kits/hospital-a/`, `kits/hospital-b/` and `kits/hospital-c/`, plus a
+`.zip` of each. Every kit holds:
+
+- `config/hospital-X.yaml`, pre-filled with the real neighbour addresses, the chain
+  and one freshly generated shared secret. Every kit from the same run gets the
+  same secret. To provision a hospital later, pass that secret with `--secret`.
+  Engine settings come from the repository's `config/hospital-X.yaml`.
+- `docker-compose.hospital.yaml`, which runs only that node.
+- `data/hospital-X.csv`, that hospital's slice. Pass `--data hospital-X=path.csv`
+  to use different data.
+- `source/`, the node's build context. With `--image <ref>`, the kit uses a
+  prebuilt image instead.
+- `README.md`, with the exact commands.
+
+The kits contain the shared secret, so send each one privately to that
+hospital's operator. The operator unpacks it and runs one command:
+
+```sh
+docker compose -f docker-compose.hospital.yaml up -d --build --wait
+```
+
+Start training from any one node (`POST /round/start`, as above). The start
+floods along the chain.
+
+**Changing an address without re-provisioning.** Any node config can be
+re-pointed from the environment: `MEDCHAIN_PEER_<ID>_URL` replaces neighbour
+`<ID>`'s URL, and `MEDCHAIN_ADVERTISE_URL` replaces the node's own address. `<ID>`
+is the node id upper-cased, with `-` and other characters turned into `_`. For
+example:
+
+```sh
+MEDCHAIN_PEER_HOSPITAL_A_URL=http://100.101.1.10:8001 \
+MEDCHAIN_PEER_HOSPITAL_C_URL=http://hospital-c.tail1234.ts.net:8003 \
+MEDCHAIN_ADVERTISE_URL=http://hospital-b.tail1234.ts.net:8002 \
+NODE_CONFIG=config/hospital-b.yaml python -m node
+```
+
+`NODE_CONFIG` can also point at a separate copy of the YAML.
+
+**The observer is optional.** The dashboard and its Postgres can run on any one
+machine:
+
+```sh
+MEDCHAIN_SHARED_SECRET=<kit secret> docker compose up -d postgres dashboard
+```
+
+Nodes write telemetry to it only when their kit was provisioned with
+`--observer-db`. It never coordinates training. A node with no observer still
+trains and still serves `/status` and `/metrics`.
+
+### Prove it
+
+`scripts/verify_multihost.py` is the acceptance test, on real laptops or on one
+machine. Point it at every node's real address. It checks that the nodes agree on
+the chain, starts one run through the first node, waits for every hospital to
+finish, and then reports what crossed the network: per hospital, the rounds
+trained, neighbour updates heard on time, and consensus; per directed link (with
+`--database-url`), packets delivered, packets received with a verified checksum,
+and exact bytes. It exits non-zero if any check fails.
+
+```sh
+python scripts/verify_multihost.py --secret <kit secret> \
+  --node http://hospital-a.tail1234.ts.net:8001 --node http://hospital-b.tail1234.ts.net:8002 \
+  --node http://hospital-c.tail1234.ts.net:8003 \
+  --database-url postgresql://medchain:medchain@observer.tail1234.ts.net:5432/medchain
+```
+
+We ran this on one machine as the stand-in for three laptops. The setup:
+
+- Three kits, generated with this machine's LAN address (`192.168.0.101`) as
+  every peer address.
+- Each kit started as its own `docker compose` project, so each node had its own
+  Docker network. From inside hospital-a, the names `hospital-b` and
+  `medchain-hospital-b-hospital-b-1` did not resolve, so every packet went to
+  `192.168.0.101:800x` through the host's network stack.
+- Postgres and the dashboard ran as two more independent containers, reached
+  through the same LAN address.
+
+The full report is in [`docs/multihost/proof-report.json`](docs/multihost/proof-report.json):
+
+```
+run run-20261002-135941-99a0  engine Q-GADMM (b=2)
+hospital     reached at                   rounds     heard degraded  loss first->final    acc  residual consensus
+hospital-a   http://192.168.0.101:8001       163  163/163         0     0.5303->0.4325  0.789  8.54e-04       159
+hospital-b   http://192.168.0.101:8002       163  326/326         0     0.4750->0.3259  0.865  8.54e-04       159
+hospital-c   http://192.168.0.101:8003       163  163/163         0     0.5529->0.5584  0.660  6.89e-04       159
+
+link                         to address                   delivered verified    bytes  float64
+hospital-a -> hospital-b     http://192.168.0.101:8002     163/163       163     1956    20864
+hospital-b -> hospital-a     http://192.168.0.101:8001     163/163       163     1956    20864
+hospital-b -> hospital-c     http://192.168.0.101:8003     163/163       163     1956    20864
+hospital-c -> hospital-b     http://192.168.0.101:8002     163/163       163     1956    20864
+PASS: every hospital trained and exchanged parameters with its neighbours over the network
+```
+
+- **Every link carried traffic.** Every hospital heard every neighbour in every
+  round, and each of the four directed links carried 163 checksum-verified
+  updates.
+- **The chain converged.** The edge residuals fell below epsilon (1e-3), and all
+  three nodes stopped together at round 163, after reaching consensus at round
+  159.
+- **Dashboard start works too.** A second run started from the dashboard's START
+  button (a fourth process relaying to `http://192.168.0.101:8001`) passed the
+  same checks.
+
+This is still one physical machine. Packets crossed real sockets on a real LAN
+address, between nodes that share no Docker network, but not a wire between two
+laptops. On real hardware, the same `verify_multihost.py` run is the test to
+pass. CI runs a smaller version on every push: `tests/unit/test_multihost.py`
+launches three separate `python -m node` processes bound to the runner's own
+network address. Their YAML peer URLs are unresolvable placeholders, and the real
+addresses arrive only through `MEDCHAIN_PEER_<ID>_URL`. The verifier must then
+pass.
+
 ## Engines
 
 `engine:` in `config/hospital-*.yaml` (same value on every node) picks one:
@@ -362,11 +508,44 @@ after 200 rounds (and gossip's hospitals still disagree). At d = 16, b=8 needs
 even fewer total bytes than b=2 because it reaches consensus in 35 rounds instead
 of 159.
 
+## How MedChain differs from Flower and NVIDIA FLARE
+
+[Flower](https://github.com/adap/flower) and
+[NVIDIA FLARE](https://github.com/NVIDIA/NVFlare) are both hub-and-spoke. In
+Flower, every client (a SuperNode) connects to one central SuperLink server,
+which selects clients and aggregates their updates. NVIDIA FLARE likewise has
+one server and per-site clients, with mutual-TLS certificates from a
+provisioning step that hands each site a startup kit.
+
+| | Flower / NVIDIA FLARE | MedChain |
+| --- | --- | --- |
+| Topology | Central server; every site connects to it | No server. Each hospital talks only to its chain neighbours (A - B - C) |
+| How the model is combined | The server aggregates the site updates (e.g. FedAvg) | Q-GADMM decentralized consensus: each node solves its local ADMM step and exchanges quantized differences with its neighbours |
+| Who sees updates | The server receives every site's update (unless secure aggregation is added) | No node receives every site's update; each gets only its neighbours' quantized differences |
+| What goes on the wire | Model weights or gradients, full precision by default | b-bit stochastic quantization of the change since the last snapshot |
+| Starting a run, observing | The server drives the rounds | A start request floods from whichever node gets it; the dashboard only observes |
+| Site setup | NVIDIA FLARE: one startup kit per site | One kit per hospital (`scripts/provision.py`), the idea borrowed from NVIDIA FLARE |
+
+**Measured bandwidth.** The model has d = 16 parameters. Each Q-GADMM b=2 packet
+is 12 bytes, against 64 bytes at 32 bits (5.3x less) and 128 bytes at float64
+(10.7x less). Over a whole run, Q-GADMM b=2 reaches the centralized optimum
+with 7.6 kB on the wire. The gossip baseline sends 102 kB in 200 rounds and its
+hospitals still disagree (`experiments/out/summary.json`). The cross-address
+run above moved 7,824 bytes across its four links, against 83,456 bytes for the
+same 652 messages at float64.
+
+**Trade-offs.** The hub frameworks are mature and scale to many sites, with
+client sampling, many aggregation strategies and certificate-based identity.
+MedChain is a three-node prototype. A chain also has weak points: if the middle
+hospital fails, the chain splits in two, and the survivors keep training on
+their own data until it rejoins.
+
 ## How it fits together
 
 - **One node image, config decides identity** (`config/hospital-*.yaml`: node_id,
   neighbours, chain, port, engine settings, data_slice). The topology is a chain
-  A - B - C.
+  A - B - C. Peer addresses can be overridden from the environment (see
+  [Running on separate machines](#running-on-separate-machines)).
 - **Peer-to-peer rounds**: a start request floods from the node that receives it;
   the gossip baseline's loop is `node/runner.py`, the ADMM engines' head/tail loop is
   `node/qgadmm/scheduler.py`. Unreachable neighbours are skipped, so survivors keep
@@ -394,8 +573,14 @@ of 159.
 ```
 docker-compose.yml   config/        node/          dashboard/
 design/              assets/svg/    data/          tests/        experiments/
-docs/screenshots/    models/
+docs/screenshots/    models/        scripts/
 ```
+
+- `scripts/provision.py` writes the per-hospital kits, and
+  `scripts/verify_multihost.py` checks a run across real addresses (see
+  [Running on separate machines](#running-on-separate-machines)).
+  `docs/multihost/proof-report.json` is the report from the single-machine
+  stand-in run.
 
 - `design/STYLE.md` and `design/tokens.css` are the Pa'lais style reference,
   adapted.
@@ -423,7 +608,10 @@ penalty/dual term, convergence sanity (N = 5 synthetic linear regression: Q-GADM
 b=2 within 1% of full-precision GADMM and 2% of centralized scikit-learn), and a
 three-node chain of real node apps over HTTP in one process, including a tail
 kill and checkpoint rejoin, plus the risk-assessment endpoints (JSON and PDF
-reports for the tabular and ECG models). `tests/integration` runs against whichever engine the
+reports for the tabular and ECG models). It also covers the peer-address environment
+overrides, the provisioning kit's files and substituted addresses, and three nodes
+as separate OS processes on the host's network address, checked by
+`scripts/verify_multihost.py`. `tests/integration` runs against whichever engine the
 configs select; CI (`.github/workflows/ci.yml`) runs it for `qgadmm`, `gadmm_fp`
 and `gossip`, plus the unit tests, the dashboard build, the docker build and a
 headless `compare_engines.py` run.

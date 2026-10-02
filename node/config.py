@@ -9,11 +9,19 @@ GADMM). The ADMM engines also read `chain` (node order 1..N),
 `rho`, `alpha`, `local_epochs`, `lr`, `epsilon`, `checkpoint_every`,
 `checkpoint_dir` and `seed` (the node's RNG uses seed + its chain position).
 The optional `assess` block overrides where the risk-assessment models are read from.
+
+Addresses are deployment, not identity, so they can be overridden from the
+environment without editing the YAML: $MEDCHAIN_ADVERTISE_URL replaces
+`advertise_url`, and $MEDCHAIN_PEER_<ID>_URL replaces the `url` of neighbour <ID>
+(upper-cased, every run of other characters as `_`: hospital-b ->
+MEDCHAIN_PEER_HOSPITAL_B_URL). That is how the same config points at Docker
+service names on one machine and at LAN IPs or Tailscale names across machines.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,6 +55,13 @@ QGADMM = "qgadmm"
 GADMM_FP = "gadmm_fp"
 ENGINE_ALIASES = {"gossip": GOSSIP, "qgadmm": QGADMM, "gadmm_fp": GADMM_FP}
 ADMM_ENGINES = (QGADMM, GADMM_FP)
+
+ADVERTISE_URL_ENV = "MEDCHAIN_ADVERTISE_URL"
+
+
+def peer_url_env(node_id: str) -> str:
+    """The environment variable that overrides neighbour `node_id`'s URL."""
+    return f"MEDCHAIN_PEER_{re.sub(r'[^A-Za-z0-9]+', '_', node_id).upper()}_URL"
 
 
 @dataclass(frozen=True)
@@ -99,7 +114,10 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
     missing = [k for k in ("node_id", "port", "data_slice", "shared_secret") if k not in raw]
     if missing:
         raise ValueError(f"{path}: missing required keys {missing}")
-    neighbours = tuple(Neighbour(id=str(n["id"]), url=str(n["url"]).rstrip("/")) for n in raw.get("neighbours") or [])
+    neighbours = tuple(
+        Neighbour(id=str(n["id"]), url=_env_url(path, peer_url_env(str(n["id"])), str(n["url"])))
+        for n in raw.get("neighbours") or []
+    )
     if any(n.id == raw["node_id"] for n in neighbours):
         raise ValueError(f"{path}: a node cannot be its own neighbour")
     if not str(raw["shared_secret"]):
@@ -116,7 +134,7 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
         node_id=str(raw["node_id"]),
         display_name=str(raw.get("display_name", raw["node_id"])),
         port=port,
-        advertise_url=str(raw.get("advertise_url", f"http://{raw['node_id']}:{port}")).rstrip("/"),
+        advertise_url=_env_url(path, ADVERTISE_URL_ENV, str(raw.get("advertise_url", f"http://{raw['node_id']}:{port}"))),
         data_slice=str(raw["data_slice"]),
         shared_secret=str(raw["shared_secret"]),
         neighbours=neighbours,
@@ -136,6 +154,16 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
         timing=TimingConfig(**(raw.get("timing") or {})),
         assess=AssessConfig(**(raw.get("assess") or {})),
     )
+
+
+def _env_url(path, var: str, configured: str) -> str:
+    """The URL from $var when it is set (it must be http(s)://...), else the configured one."""
+    override = os.environ.get(var, "").strip()
+    if not override:
+        return configured.rstrip("/")
+    if not re.match(r"https?://[^/]", override):
+        raise ValueError(f"{path}: ${var}={override!r} must be an http:// or https:// URL")
+    return override.rstrip("/")
 
 
 def _check_chain(path, node_id: str, chain: tuple[str, ...], neighbours: tuple[Neighbour, ...]) -> None:

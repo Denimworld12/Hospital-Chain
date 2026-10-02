@@ -10,3 +10,5 @@ dashboard/dist/
 models/heart-risk.joblib
 # ~615 MB of Mendeley ECG images fetched by data/prepare_ecg.py
 data/ecg-images/
+# per-hospital node kits written by scripts/provision.py (they contain the shared secret)
+kits/
