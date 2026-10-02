@@ -43,9 +43,16 @@ class Report:
         return not self.failures
 
 
+class Unreachable(Exception):
+    pass
+
+
 def get(client: httpx.Client, url: str, path: str) -> dict:
-    resp = client.get(f"{url}{path}")
-    resp.raise_for_status()
+    try:
+        resp = client.get(f"{url}{path}")
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise Unreachable(f"{url} unreachable ({path}): {exc}") from exc
     return resp.json()
 
 
@@ -187,17 +194,21 @@ def verify(urls: list[str], secret: str, *, rounds: int | None = None, database_
     report = Report()
     urls = [u.rstrip("/") for u in urls]
     with httpx.Client(timeout=10) as client:
-        statuses = {u: get(client, u, "/status") for u in urls}
-        check_topology(statuses, report)
-        if report.failures:
+        try:
+            statuses = {u: get(client, u, "/status") for u in urls}
+            check_topology(statuses, report)
+            if report.failures:
+                return report
+            report.engine = next(iter(statuses.values()))["engine"]
+            if start:
+                report.run_id = start_run(client, urls[0], secret, rounds)["run_id"]
+            else:
+                report.run_id = next(iter(statuses.values()))["run_id"]
+            statuses = wait_finished(client, urls, report.run_id, timeout)
+            metrics = {u: get(client, u, "/metrics") for u in urls}
+        except Unreachable as exc:
+            report.failures.append(str(exc))
             return report
-        report.engine = next(iter(statuses.values()))["engine"]
-        if start:
-            report.run_id = start_run(client, urls[0], secret, rounds)["run_id"]
-        else:
-            report.run_id = next(iter(statuses.values()))["run_id"]
-        statuses = wait_finished(client, urls, report.run_id, timeout)
-        metrics = {u: get(client, u, "/metrics") for u in urls}
     check_run(statuses, metrics, report)
     if database_url:
         db_links(database_url, report.run_id, report)

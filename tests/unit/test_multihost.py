@@ -8,6 +8,7 @@ override mechanism works and the packets cross real sockets. scripts/verify_mult
 then checks the run from outside, exactly as it would across real machines.
 """
 
+import json
 import os
 import socket
 import subprocess
@@ -122,3 +123,14 @@ def test_three_processes_on_real_addresses_train_to_consensus(processes):
         assert info["rounds"] > 0 and info["updates_heard"] == info["updates_expected"] > 0
         assert info["converged_round"] is not None and info["final_max_residual"] < 1e-3
     assert {info["rounds"] for info in report.nodes.values()} == {report.nodes["hospital-a"]["rounds"]}
+
+
+def test_verify_reports_an_unreachable_node_instead_of_raising(tmp_path, capsys):
+    (port,) = free_ports_on("127.0.0.1", 1)  # closed again: connecting is refused
+    url = f"http://127.0.0.1:{port}"
+    out = tmp_path / "report.json"
+    assert verify_multihost.main(["--secret", SECRET, "--node", url, "--json", str(out)]) == 1
+    printed = capsys.readouterr().out
+    assert f"FAIL  {url} unreachable" in printed and "FAILED" in printed
+    report = json.loads(out.read_text())
+    assert report["passed"] is False and any(url in f for f in report["failures"])
