@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 PEERS = ("hospital-a=http://100.101.1.10:8001,"
          "hospital-b=hospital-b.tail1234.ts.net:8002,"
-         "hospital-c=https://hospital-c.example.org:9443")
+         "hospital-c=http://hospital-c.example.org:9443")
 SECRET = "kit-test-secret"
 
 
@@ -39,7 +39,7 @@ def test_kit_has_every_file_with_the_real_addresses_substituted(tmp_path):
     assert cfg.port == 8002 and cfg.host == "0.0.0.0"
     assert cfg.chain == ("hospital-a", "hospital-b", "hospital-c")
     assert {n.id: n.url for n in cfg.neighbours} == {"hospital-a": "http://100.101.1.10:8001",
-                                                     "hospital-c": "https://hospital-c.example.org:9443"}
+                                                     "hospital-c": "http://hospital-c.example.org:9443"}
     assert cfg.shared_secret == SECRET and cfg.data_slice == "/data/hospital-b.csv"
     # engine settings come from the repo's own config for that hospital
     repo = load_config(ROOT / "config" / "hospital-b.yaml")
@@ -59,7 +59,7 @@ def test_kit_has_every_file_with_the_real_addresses_substituted(tmp_path):
     readme = (kit / "README.md").read_text()
     assert "docker compose -f docker-compose.hospital.yaml up -d --build --wait" in readme
     for addr in ("http://100.101.1.10:8001", "http://hospital-b.tail1234.ts.net:8002",
-                 "https://hospital-c.example.org:9443", "MEDCHAIN_PEER_HOSPITAL_A_URL", SECRET):
+                 "http://hospital-c.example.org:9443", "MEDCHAIN_PEER_HOSPITAL_A_URL", SECRET):
         assert addr in readme
 
     with zipfile.ZipFile(tmp_path / "hospital-b.zip") as z:
@@ -102,7 +102,8 @@ def test_a_new_hospital_uses_the_template_and_needs_a_port(tmp_path):
 @pytest.mark.parametrize("peers, extra", [
     ("hospital-a=http://10.0.0.1:8001", []),                                     # not a chain
     ("hospital-a=http://10.0.0.1:8001,hospital-a=http://10.0.0.2:8001", []),    # duplicate id
-    ("hospital-a=ftp://10.0.0.1:8001,hospital-b=http://10.0.0.2:8002", []),     # not http(s)
+    ("hospital-a=ftp://10.0.0.1:8001,hospital-b=http://10.0.0.2:8002", []),     # not http
+    ("hospital-a=https://10.0.0.1:8001,hospital-b=http://10.0.0.2:8002", []),   # node serves plain HTTP only
     ("hospital-a=http://10.0.0.1:8001,hospital-b=http://10.0.0.2:8002", ["--hospital", "hospital-c"]),
 ])
 def test_rejects_bad_peer_lists(tmp_path, peers, extra):

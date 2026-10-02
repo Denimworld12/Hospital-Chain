@@ -52,8 +52,11 @@ def parse_peers(spec: str) -> dict[str, str]:
         if "://" not in addr:
             addr = f"http://{addr}"
         parts = urlsplit(addr)
-        if parts.scheme not in ("http", "https") or not parts.hostname:
-            raise ValueError(f"--peers address for {node_id} is not an http(s) URL: {addr!r}")
+        if parts.scheme == "https":
+            raise ValueError(f"--peers address for {node_id} uses https, but the node serves plain HTTP; "
+                             "use http:// and let the private network (e.g. Tailscale) encrypt the link")
+        if parts.scheme != "http" or not parts.hostname:
+            raise ValueError(f"--peers address for {node_id} is not an http URL: {addr!r}")
         peers[node_id] = addr.rstrip("/")
     if len(peers) < 2:
         raise ValueError("--peers needs at least two hospitals (the chain)")
