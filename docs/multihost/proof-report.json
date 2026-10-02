@@ -1,0 +1,110 @@
+{
+  "run_id": "run-20261002-135941-99a0",
+  "engine": "Q-GADMM (b=2)",
+  "nodes": {
+    "hospital-a": {
+      "url": "http://192.168.0.101:8001",
+      "neighbour_urls": {
+        "hospital-b": "http://192.168.0.101:8002"
+      },
+      "run_state": "completed",
+      "rounds": 163,
+      "updates_heard": 163,
+      "updates_expected": 163,
+      "degraded_rounds": 0,
+      "last_send": {
+        "hospital-b": "delivered"
+      },
+      "first_loss": 0.530276238316868,
+      "final_loss": 0.43248572524456713,
+      "final_accuracy": 0.7894736842105263,
+      "final_max_residual": 0.0008538717314993929,
+      "converged_round": 159
+    },
+    "hospital-b": {
+      "url": "http://192.168.0.101:8002",
+      "neighbour_urls": {
+        "hospital-a": "http://192.168.0.101:8001",
+        "hospital-c": "http://192.168.0.101:8003"
+      },
+      "run_state": "completed",
+      "rounds": 163,
+      "updates_heard": 326,
+      "updates_expected": 326,
+      "degraded_rounds": 0,
+      "last_send": {
+        "hospital-a": "delivered",
+        "hospital-c": "delivered"
+      },
+      "first_loss": 0.47502511289687094,
+      "final_loss": 0.3259369872811155,
+      "final_accuracy": 0.8648648648648649,
+      "final_max_residual": 0.0008538717314993929,
+      "converged_round": 159
+    },
+    "hospital-c": {
+      "url": "http://192.168.0.101:8003",
+      "neighbour_urls": {
+        "hospital-b": "http://192.168.0.101:8002"
+      },
+      "run_state": "completed",
+      "rounds": 163,
+      "updates_heard": 163,
+      "updates_expected": 163,
+      "degraded_rounds": 0,
+      "last_send": {
+        "hospital-b": "delivered"
+      },
+      "first_loss": 0.5528942322319922,
+      "final_loss": 0.5584495990748203,
+      "final_accuracy": 0.66,
+      "final_max_residual": 0.0006892344623766976,
+      "converged_round": 159
+    }
+  },
+  "links": [
+    {
+      "sender": "hospital-a",
+      "receiver": "hospital-b",
+      "receiver_url": "http://192.168.0.101:8002",
+      "delivered": 163,
+      "attempts": 163,
+      "received_and_verified": 163,
+      "payload_bytes": 1956,
+      "float64_bytes": 20864
+    },
+    {
+      "sender": "hospital-b",
+      "receiver": "hospital-a",
+      "receiver_url": "http://192.168.0.101:8001",
+      "delivered": 163,
+      "attempts": 163,
+      "received_and_verified": 163,
+      "payload_bytes": 1956,
+      "float64_bytes": 20864
+    },
+    {
+      "sender": "hospital-b",
+      "receiver": "hospital-c",
+      "receiver_url": "http://192.168.0.101:8003",
+      "delivered": 163,
+      "attempts": 163,
+      "received_and_verified": 163,
+      "payload_bytes": 1956,
+      "float64_bytes": 20864
+    },
+    {
+      "sender": "hospital-c",
+      "receiver": "hospital-b",
+      "receiver_url": "http://192.168.0.101:8002",
+      "delivered": 163,
+      "attempts": 163,
+      "received_and_verified": 163,
+      "payload_bytes": 1956,
+      "float64_bytes": 20864
+    }
+  ],
+  "failures": [],
+  "warnings": [],
+  "passed": true
+}

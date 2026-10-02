@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from node.config import load_config
+from node.config import load_config, peer_url_env
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIGS = sorted((ROOT / "config").glob("*.yaml"))
@@ -77,3 +77,35 @@ def test_rejects_self_neighbour(tmp_path):
     p.write_text("node_id: x\nport: 1\ndata_slice: s.csv\nshared_secret: s\nneighbours:\n  - id: x\n    url: http://x:1\n")
     with pytest.raises(ValueError):
         load_config(p)
+
+
+def test_peer_urls_and_advertise_url_come_from_the_environment(monkeypatch):
+    """The same YAML points at real hosts (LAN IP, Tailscale name) with no edit, only env."""
+    monkeypatch.setenv("MEDCHAIN_PEER_HOSPITAL_A_URL", "http://192.168.1.20:8001/")
+    monkeypatch.setenv("MEDCHAIN_PEER_HOSPITAL_C_URL", "https://hospital-c.tail1234.ts.net:8003")
+    monkeypatch.setenv("MEDCHAIN_ADVERTISE_URL", "http://hospital-b.tail1234.ts.net:8002")
+    c = load_config(ROOT / "config" / "hospital-b.yaml")
+    assert c.neighbour("hospital-a").url == "http://192.168.1.20:8001"
+    assert c.neighbour("hospital-c").url == "https://hospital-c.tail1234.ts.net:8003"
+    assert c.advertise_url == "http://hospital-b.tail1234.ts.net:8002"
+    # an override for another node's peer does not leak into this one
+    a = load_config(ROOT / "config" / "hospital-a.yaml")
+    assert a.neighbour("hospital-b").url == "http://hospital-b:8002"
+
+
+def test_without_overrides_the_yaml_addresses_stand(monkeypatch):
+    monkeypatch.setenv("MEDCHAIN_PEER_HOSPITAL_B_URL", "  ")
+    c = load_config(ROOT / "config" / "hospital-a.yaml")
+    assert c.neighbour("hospital-b").url == "http://hospital-b:8002"
+    assert c.advertise_url == "http://hospital-a:8001"
+
+
+def test_peer_url_env_names():
+    assert peer_url_env("hospital-b") == "MEDCHAIN_PEER_HOSPITAL_B_URL"
+    assert peer_url_env("st.mary's--east") == "MEDCHAIN_PEER_ST_MARY_S_EAST_URL"
+
+
+def test_rejects_an_override_that_is_not_a_url(monkeypatch):
+    monkeypatch.setenv("MEDCHAIN_PEER_HOSPITAL_B_URL", "192.168.1.21:8002")
+    with pytest.raises(ValueError, match="MEDCHAIN_PEER_HOSPITAL_B_URL"):
+        load_config(ROOT / "config" / "hospital-a.yaml")
