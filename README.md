@@ -319,7 +319,8 @@ python scripts/provision.py --zip \
 ```
 
 `--peers` lists every hospital in chain order, each with the address its
-neighbours reach it at: a LAN IP, a Tailscale name or a domain. The command
+neighbours reach it at: a LAN IP, a Tailscale name or a domain. Addresses must be
+`http://`; `https://` is rejected because the node serves plain HTTP. The command
 writes `kits/hospital-a/`, `kits/hospital-b/` and `kits/hospital-c/`, plus a
 `.zip` of each. Every kit holds:
 
