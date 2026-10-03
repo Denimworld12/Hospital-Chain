@@ -288,3 +288,30 @@ def test_the_gossip_baseline_also_takes_its_chain_from_the_directory(tmp_path):
             assert {s["status"] for s in net.nodes[n].db.sent} == {"delivered"}  # signed, over TLS, accepted
     finally:
         net.stop()
+
+
+def test_a_chain_change_never_applies_mid_round(tmp_path):
+    """Only at a round boundary: a chain change that arrives mid-run waits, even if it names no round."""
+    from node.config import load_config
+    from node.db import NullDatabase
+    from node.membership import Member
+    from node.runner import Runner
+    from node.writer import DbWriter
+
+    from chain_harness import write_configs
+
+    cfg = load_config(write_configs(tmp_path, ["a", "b", "c"])["b"])
+    r = Runner(cfg, engine=None, db=DbWriter(NullDatabase()), client=None)
+    members = {m: Member(m, f"http://{m}:1") for m in "abcd"}
+    r.state, r.run_id, r.current_round = "running", "run-1", 7
+    r.membership = Membership(epoch=1, chain=("a", "b", "c"), members=members)
+    grown = Membership(epoch=2, chain=("a", "b", "c", "d"), members=members)  # no effective_round
+    assert r.offer_membership(grown) == "scheduled"
+    assert r.membership.epoch == 1 and r.peer("c") is not None  # still the old chain mid-round
+    moved = Membership(epoch=3, chain=("a", "b", "c", "d"), members={**members, "d": Member("d", "http://d:2")})
+    assert r.offer_membership(moved) == "scheduled", "queued behind the pending change, in epoch order"
+    assert [d.epoch for d in r._due(8)] == [2, 3]
+    # between runs, nothing is in flight: a change applies at once
+    r.state = "completed"
+    assert r.offer_membership(Membership(epoch=4, chain=("a", "b"), members=members)) == "applied"
+    assert r.membership.epoch == 4 and [n.id for n in r.neighbours] == ["a"]

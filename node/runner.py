@@ -134,14 +134,16 @@ class Runner:
         """Take a (verified) membership document: apply it now, or schedule it for its round boundary."""
         if doc.epoch <= self.known_epoch:
             return "stale"
-        idle_change = not self.active or doc.effective_round is None
-        if idle_change or (self.membership and doc.same_chain(self.membership) and not self._pending):
+        only_addresses = not self._pending and self.membership is not None and doc.same_chain(self.membership)
+        if not self.active or only_addresses:
             for d in [*self._pending, doc]:  # nothing is in flight (or only addresses changed): apply now
                 self._apply_membership(d, None)
             self._pending = []
             return "applied"
+        # mid-run, a chain change always waits for a round boundary (the next one if none is named)
         self._pending = sorted(self._pending + [doc], key=lambda d: d.epoch)
-        late = doc.run_id == self.run_id and doc.effective_round <= self.current_round
+        late = (doc.run_id == self.run_id and doc.effective_round is not None
+                and doc.effective_round <= self.current_round)
         if late:
             log.warning("membership epoch %d was due at round %d but I am already in round %d; applying it at "
                         "the next boundary", doc.epoch, doc.effective_round, self.current_round)
