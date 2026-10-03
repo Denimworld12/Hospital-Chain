@@ -1,11 +1,12 @@
-"""Run the three MedChain engines headless on the real UCI chain and plot loss vs bits transmitted.
+"""Run the three MedChain engines headless on a real UCI chain and plot loss vs bits transmitted.
 
-    python experiments/compare_engines.py            # writes experiments/out/
+    python experiments/compare_engines.py            # the committed figures: chain A - B - C
+    python experiments/compare_engines.py --chain hospital-a,hospital-b,hospital-c,hospital-d,hospital-e
 
 Everything runs in one process (no Docker, no HTTP) with the production engine code:
 node/gossip.py for the naive gossip baseline and node/qgadmm/ for Q-GADMM and
-full-precision GADMM, on the same three hospital slices, train/test split and
-hyperparameters as config/*.yaml. The bits on the x axis are the exact packet
+full-precision GADMM, on any chain of the hospitals in config/ (one slice each),
+with the same train/test split and hyperparameters as config/hospital-*.yaml. The bits on the x axis are the exact packet
 bytes each engine puts on the wire (the same payload_bytes the nodes log to
 updates_meta), times 8.
 
@@ -44,17 +45,17 @@ from node.qgadmm.scheduler import simulate  # noqa: E402
 from node.qgadmm.state import ChainPosition  # noqa: E402
 from node.trainer import LocalTrainer  # noqa: E402
 
-CONFIGS = sorted((ROOT / "config").glob("hospital-*.yaml"))
+DEFAULT_CHAIN = ("hospital-a", "hospital-b", "hospital-c")  # the committed figures; --chain takes any length
 SWEEP_RHOS = (5.0, 15.0, 24.0, 50.0)
 
 # Pa'lais palette (design/tokens.css): indigo is the brand line; gold and orange are accents.
 INDIGO, GOLD, ORANGE, SKY, SAGE, INK, CREAM = "#234386", "#ffc400", "#ed7328", "#6aa8dc", "#a2d3a6", "#000000", "#fbf9f6"
 
 
-def load_chain():
-    cfgs = [load_config(p) for p in CONFIGS]
-    chain = cfgs[0].chain
-    cfgs.sort(key=lambda c: chain.index(c.node_id))
+def load_chain(chain=DEFAULT_CHAIN):
+    if len(chain) < 2 or len(set(chain)) != len(chain):
+        raise SystemExit(f"--chain needs at least two distinct hospitals, got {list(chain)}")
+    cfgs = [load_config(ROOT / "config" / f"{n}.yaml") for n in chain]
     trainers = []
     for c in cfgs:
         data = ROOT / "data" / "slices" / Path(c.data_slice).name  # the container path, resolved on the host
@@ -63,10 +64,14 @@ def load_chain():
     return cfgs, trainers
 
 
+def chain_of(cfgs) -> tuple[str, ...]:
+    return tuple(c.node_id for c in cfgs)
+
+
 def admm_engines(cfgs, trainers, bits, rho=None):
     out = []
     for c, t in zip(cfgs, trainers):
-        pos = ChainPosition(c.chain, c.node_id)
+        pos = ChainPosition(chain_of(cfgs), c.node_id)
         out.append(QGADMMEngine(t.X_train, t.y_train, t.X_test, t.y_test, position=pos, rho=rho or c.rho,
                                 alpha=c.alpha, bits=bits, local_epochs=c.local_epochs, lr=c.lr,
                                 seed=c.seed + pos.position))
@@ -98,8 +103,8 @@ def run_admm(cfgs, trainers, bits, rounds, rho=None):
 def run_gossip(cfgs, trainers, rounds):
     """The node round loop of node/runner.py, in process: train, send float64 weights, average."""
     engines = [GossipBaselineEngine(t) for t in trainers]
-    ids = [c.node_id for c in cfgs]
-    neighbours = {c.node_id: [n.id for n in c.neighbours] for c in cfgs}
+    ids = list(chain_of(cfgs))
+    neighbours = {m: [ids[j] for j in (i - 1, i + 1) if 0 <= j < len(ids)] for i, m in enumerate(ids)}
     for e in engines:
         e.reset()
     rows, cum_bits = [], 0
@@ -175,7 +180,7 @@ CURVES = [  # key, colour, line style
 ]
 
 
-def plot_money_shot(results, central, out: Path):
+def plot_money_shot(results, central, out: Path, n: int):
     fig, ax = plt.subplots(figsize=(9, 5.6), dpi=150)
     fig.patch.set_facecolor(CREAM)
     style(ax)
@@ -194,7 +199,7 @@ def plot_money_shot(results, central, out: Path):
     ax.set_xscale("log")
     ax.set_xlabel("cumulative bits transmitted, all links (log scale)", color=INK)
     ax.set_ylabel("training loss (mean log-loss, all hospitals)", color=INK)
-    ax.set_title("MedChain: loss vs communication - 3-hospital chain, UCI heart disease (d = 16)", color=INDIGO,
+    ax.set_title(f"MedChain: loss vs communication - {n}-hospital chain, UCI heart disease (d = 16)", color=INDIGO,
                  fontsize=11, loc="left", fontweight="bold")
     lo = min(min(row["loss"] for row in results[k]["rows"]) for k, _, _ in CURVES)
     ax.set_ylim(lo - 0.02, min(0.75, max(results["qgadmm_b2"]["rows"][0]["loss"], 0.6) + 0.02))
@@ -266,10 +271,12 @@ def main(argv=None):
     ap.add_argument("--sweep-rounds", type=int, default=500, help="round limit for the rho sweep")
     ap.add_argument("--out", type=Path, default=ROOT / "experiments" / "out")
     ap.add_argument("--no-sweep", action="store_true", help="skip the rho sweep")
+    ap.add_argument("--chain", default=",".join(DEFAULT_CHAIN),
+                    help="hospitals in chain order, any length >= 2 (default: %(default)s)")
     args = ap.parse_args(argv)
     args.out.mkdir(parents=True, exist_ok=True)
 
-    cfgs, trainers = load_chain()
+    cfgs, trainers = load_chain(tuple(c.strip() for c in args.chain.split(",") if c.strip()))
     rounds = args.rounds or cfgs[0].training.rounds
     central = centralized_loss(trainers)
     print(f"chain {' - '.join(c.node_id for c in cfgs)}; rho={cfgs[0].rho} E={cfgs[0].local_epochs} "
@@ -286,7 +293,7 @@ def main(argv=None):
         print(f"  {r['label']:<40} rounds={last['round']:>4} consensus={r['converged_at']!s:>5} "
               f"loss={last['loss']:.5f} ({(last['loss'] / central - 1) * 100:+.2f}% vs centralized) "
               f"bytes={last['cumulative_bits'] // 8:>9,}  {agree}  [{r['seconds']}s]")
-    plot_money_shot(results, central, args.out / "compare_engines.png")
+    plot_money_shot(results, central, args.out / "compare_engines.png", len(cfgs))
 
     q2 = results["qgadmm_b2"]["rows"]
     measured = 4 * results["qgadmm_b2"]["d"] * q2[-1]["messages"] / q2[-1]["payload_bytes"]
@@ -305,7 +312,7 @@ def main(argv=None):
         plot_rho_sweep(sweep, central, args.out / "rho_sweep.png", cfgs[0].epsilon)
 
     summary = {
-        "config": {"chain": list(cfgs[0].chain), "rho": cfgs[0].rho, "alpha": cfgs[0].alpha,
+        "config": {"chain": list(chain_of(cfgs)), "rho": cfgs[0].rho, "alpha": cfgs[0].alpha,
                    "local_epochs": cfgs[0].local_epochs, "lr": cfgs[0].lr, "epsilon": cfgs[0].epsilon,
                    "rounds": rounds},
         "centralized_loss": central,

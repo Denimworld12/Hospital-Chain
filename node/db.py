@@ -1,8 +1,11 @@
 """Postgres writes: nodes, runs, rounds, updates_meta, metrics, audit_logs.
 
-The only schema addition since the MVP is the nullable metrics.residuals column
-(per-edge primal residuals, written by the ADMM engines; the gossip baseline
-writes NULL). It is added in place, so an existing database upgrades on start.
+Schema additions since the MVP are all nullable columns added in place, so an
+existing database upgrades on start: metrics.residuals (per-edge primal residuals,
+written by the ADMM engines; NULL for the gossip baseline), metrics.epoch and
+metrics.chain_size (the membership epoch and chain length of that round), and
+nodes.epoch / chain / in_chain / membership_round (each node's current view of the
+chain, so the dashboard can draw it; the directory's own store is separate).
 
 Nodes are the only writers. The dashboard reads these tables and never writes
 them. Writes are best-effort: a database outage is logged and training carries
@@ -94,6 +97,13 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 -- ADMM engines: per-edge primal residuals for the round (NULL for the gossip baseline)
 ALTER TABLE metrics ADD COLUMN IF NOT EXISTS residuals JSONB;
+-- dynamic membership: the epoch and chain length each round ran under, and each node's view of the chain
+ALTER TABLE metrics ADD COLUMN IF NOT EXISTS epoch INTEGER;
+ALTER TABLE metrics ADD COLUMN IF NOT EXISTS chain_size INTEGER;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS epoch INTEGER;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS chain JSONB;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS in_chain BOOLEAN;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS membership_round INTEGER;
 """
 
 SCHEMA_LOCK_KEY = 4242_0001
@@ -164,6 +174,14 @@ class Database:
             (node_id, display_name, url, patients, json.dumps(neighbours), engine),
         )
 
+    def membership(self, *, node_id: str, epoch: int, chain: list[str], neighbours: list[str], in_chain: bool,
+                   membership_round: int | None) -> None:
+        self._execute(
+            """UPDATE nodes SET epoch = %s, chain = %s::jsonb, neighbours = %s::jsonb, in_chain = %s,
+                      membership_round = %s WHERE node_id = %s""",
+            (epoch, json.dumps(chain), json.dumps(neighbours), in_chain, membership_round, node_id),
+        )
+
     def heartbeat(self, node_id: str, run_id: str | None, run_state: str, current_round: int) -> None:
         self._execute(
             "UPDATE nodes SET last_heartbeat = now(), run_id = %s, run_state = %s, current_round = %s WHERE node_id = %s",
@@ -198,12 +216,14 @@ class Database:
         )
 
     def record_metrics(self, *, run_id: str, node_id: str, round_num: int, loss: float, accuracy: float,
-                       train_loss: float, n_train: int, n_test: int, residuals: dict | None = None) -> None:
+                       train_loss: float, n_train: int, n_test: int, residuals: dict | None = None,
+                       epoch: int | None = None, chain_size: int | None = None) -> None:
         self._execute(
-            """INSERT INTO metrics (run_id, node_id, round, loss, accuracy, train_loss, n_train, n_test, residuals)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) ON CONFLICT (run_id, node_id, round) DO NOTHING""",
+            """INSERT INTO metrics (run_id, node_id, round, loss, accuracy, train_loss, n_train, n_test, residuals,
+                                    epoch, chain_size)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s) ON CONFLICT (run_id, node_id, round) DO NOTHING""",
             (run_id, node_id, round_num, loss, accuracy, train_loss, n_train, n_test,
-             None if residuals is None else json.dumps(residuals)),
+             None if residuals is None else json.dumps(residuals), epoch, chain_size),
         )
 
     def audit(self, *, node_id: str, event: str, run_id: str | None = None, round_num: int | None = None,

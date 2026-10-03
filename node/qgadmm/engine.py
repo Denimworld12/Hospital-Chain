@@ -312,11 +312,14 @@ class QGADMMEngine(Engine):
     def snapshot_for(self, requester: str) -> dict:
         """What a neighbour needs to resync with me: my theta_hat, my mirror of it, our edge's lambda.
 
-        Model state only - never raw data.
+        Model state only - never raw data. For a neighbour I am not linked to yet (a link that starts
+        at the next boundary) only my theta_hat is meaningful: the mirror is unset and lambda is 0.
         """
         with self.lock:
-            if requester not in self.state.mirrors:
-                raise KeyError(requester)
+            if requester not in self.state.mirrors:  # a link that starts at the next round boundary
+                z = np.zeros(self.d, dtype=np.float64)
+                return {"theta_hat": self.state.theta_hat.copy(), "seq": self.state.seq, "mirror": z,
+                        "mirror_seq": -1, "lambda": z.copy()}
             return {
                 "theta_hat": self.state.theta_hat.copy(),
                 "seq": self.state.seq,
@@ -324,6 +327,39 @@ class QGADMMEngine(Engine):
                 "mirror_seq": self.state.mirror_seq[requester],
                 "lambda": self.state.lambdas[requester].copy(),
             }
+
+    # -- membership changes (always at a round boundary) ----------------------
+    def relink(self, position: ChainPosition) -> tuple[set[str], set[str]]:
+        """Move to a new chain position. Returns (added, removed) neighbours.
+
+        A removed link's mirror and lambda are discarded. A new link starts at lambda = 0 with an
+        unusable mirror (seq -1): nothing from that neighbour can be decoded until a full theta_hat
+        snapshot has been exchanged (adopt_mirror), exactly as after a rejoin. Links that survive keep
+        their state: the chain only ever loses or gains members, it is never reordered, so a surviving
+        edge keeps its (left, right) orientation and its lambda keeps its sign.
+        """
+        with self.lock:
+            old, new = set(self.state.mirrors), set(position.neighbours)
+            for m in old - new:
+                for d in (self.state.mirrors, self.state.mirror_seq, self.state.lambdas):
+                    d.pop(m, None)
+            for m in new - old:
+                self.state.mirrors[m] = np.zeros(self.d, dtype=np.float64)
+                self.state.mirror_seq[m] = -1
+                self.state.lambdas[m] = np.zeros(self.d, dtype=np.float64)
+            self.pos = position
+            return new - old, old - new
+
+    def warm_start(self, theta_hat: np.ndarray) -> None:
+        """A hospital joining mid-run starts from its new neighbour's published model, not from zero.
+
+        Its own theta_hat (what neighbours will believe about it) starts at that same vector, seq 0;
+        the neighbour still takes it from a full snapshot before decoding anything from this node.
+        """
+        with self.lock:
+            v = np.asarray(theta_hat, dtype=np.float64)
+            self.state.theta, self.state.theta_hat, self.state.seq = v.copy(), v.copy(), 0
+            self._load_theta(self.state.theta)
 
     def adopt_mirror(self, sender: str, theta_hat: np.ndarray, seq: int) -> None:
         with self.lock:

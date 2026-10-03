@@ -7,7 +7,10 @@ const pct = (v) => `${Math.round(v * 100)}%`;
 const loss = (v) => (v == null ? "-" : Number(v).toFixed(2));
 
 export default function TrainingMonitor({ snapshot }) {
-  const nodes = snapshot?.nodes || [];
+  // chain members in chain order, then hospitals that left (their history from this run stays visible)
+  const chain = snapshot?.topology?.chain || [];
+  const rank = (n) => (chain.includes(n.node_id) ? chain.indexOf(n.node_id) : chain.length);
+  const nodes = [...(snapshot?.nodes || [])].sort((a, b) => rank(a) - rank(b));
   const total = snapshot?.run?.total_rounds || 20;
   return (
     <section className="section">
@@ -26,7 +29,7 @@ export default function TrainingMonitor({ snapshot }) {
             return (
               <article key={n.node_id} className="node-card-wrap" data-node={n.node_id}>
                 <Eyebrow>
-                  {n.display_name} - {n.patients} patients
+                  {n.display_name} - {n.patients} patients{chain.length > 0 && !chain.includes(n.node_id) ? " - left the chain" : ""}
                 </Eyebrow>
                 <div className="card node-card">
                   <div className="node-card__head">

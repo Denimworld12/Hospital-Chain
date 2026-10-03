@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import zlib
+
 import httpx
 
 from .config import GADMM_FP, GOSSIP, QGADMM, NodeConfig
@@ -35,18 +37,25 @@ def build_engine(cfg: NodeConfig, trainer: LocalTrainer) -> Engine:
         bits = quantizer.FULL_PRECISION_BITS
     else:
         raise ValueError(f"unknown engine {cfg.engine!r}")
-    pos = ChainPosition(cfg.chain, cfg.node_id)
+    if cfg.directory:  # the position arrives with the directory's first membership document
+        pos = ChainPosition((cfg.node_id,), cfg.node_id)
+        seed = cfg.seed + zlib.crc32(cfg.node_id.encode()) % 10_000  # stable per hospital, whatever its position
+    else:
+        pos = ChainPosition(cfg.chain, cfg.node_id)
+        seed = cfg.seed + pos.position
     return QGADMMEngine(
         trainer.X_train, trainer.y_train, trainer.X_test, trainer.y_test,
         position=pos, rho=cfg.rho, alpha=cfg.alpha, bits=bits, local_epochs=cfg.local_epochs, lr=cfg.lr,
-        seed=cfg.seed + pos.position,
+        seed=seed,
     )
 
 
-def build_runner(cfg: NodeConfig, engine: Engine, db: DbWriter, client: httpx.AsyncClient) -> Runner:
+def build_runner(cfg: NodeConfig, engine: Engine, db: DbWriter, client: httpx.AsyncClient, **kw) -> Runner:
+    """`kw`: signing_key, membership (see Runner)."""
     if cfg.engine == GOSSIP:
-        return Runner(cfg, engine, db, client)
+        return Runner(cfg, engine, db, client, **kw)
     from .qgadmm.scheduler import ChainRoundScheduler
     from .qgadmm.state import checkpoint_path
 
-    return ChainRoundScheduler(cfg, engine, db, client, checkpoint_path=checkpoint_path(cfg.checkpoint_dir, cfg.node_id))
+    return ChainRoundScheduler(cfg, engine, db, client, checkpoint_path=checkpoint_path(cfg.checkpoint_dir, cfg.node_id),
+                               **kw)

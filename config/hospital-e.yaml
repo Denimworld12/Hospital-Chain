@@ -1,0 +1,65 @@
+# MedChain node configuration. Every node runs the same image; this file alone
+# decides which hospital it is and which data it reads. Its place in the chain and
+# its neighbours come from the directory service (directory/), not from this file.
+node_id: hospital-e
+display_name: Hospital E
+port: 8005
+advertise_url: https://hospital-e:8005
+
+# The directory decides where this hospital sits in the chain (odd positions are
+# the HEAD group, even the TAIL group) and tells it who its neighbours are, in
+# membership documents signed with the directory's key. It is only asked about
+# membership: training never waits for it. The credential is this hospital's own
+# (scripts/pki.py writes one per hospital; the directory stores only its hash).
+directory:
+  url: https://directory:8100
+  credential_file: /pki/hospital-e/credential
+  public_key: file:/pki/directory/signing.pub
+
+# TLS on every node-to-node link (certificates from the network CA, scripts/pki.py),
+# and the Ed25519 key that signs every /update this node sends. Receivers verify the
+# signature with the key the directory published for this hospital.
+tls:
+  cert: /pki/hospital-e/tls.crt
+  key: /pki/hospital-e/tls.key
+  ca: /pki/ca.crt
+signing_key: /pki/hospital-e/signing.key
+
+# Pre-shared secret every peer (and the dashboard relay) sends in the
+# X-MedChain-Secret header on /snapshot, /round/* and /membership/leave. Same value
+# on all nodes. (Who sent an /update is proven by its signature, not by this.)
+shared_secret: medchain-demo-secret
+
+# Only this hospital's own slice is mounted into its container.
+data_slice: /data/hospital-e.csv
+
+# Training engine:
+#   qgadmm    Q-GADMM (Elgabli et al., IEEE Trans. Commun. 2021): stochastic b-bit
+#             quantized differences, head/tail group ADMM on the chain
+#   gadmm_fp  full-precision GADMM: same algorithm, quantization skipped (raw float32 deltas)
+#   gossip    the naive gossip baseline: plain neighbour weight averaging, float64
+#             weights (ignores rho, bits and the ADMM settings below)
+engine: qgadmm
+
+# ADMM settings (qgadmm / gadmm_fp)
+rho: 5.0              # penalty; the {5, 15, 24, 50} sweep is in experiments/compare_engines.py. At b=2
+                      # rho=5 reaches consensus on chains of 3, 4 and 5 hospitals; 24 stalls above epsilon at 4+
+alpha: 1.0            # dual step scale (1.0 for logistic regression; 0.01 reserved for DNNs)
+bits: 2               # qgadmm bits per coordinate: 2, 4 or 8
+local_epochs: 50      # full-batch Adam steps per primal step (E=5 never reaches consensus here)
+lr: 0.01              # Adam learning rate
+epsilon: 0.001        # consensus: max edge residual below this for 3 consecutive rounds
+checkpoint_every: 5   # rounds between checkpoints to /checkpoints (a docker volume)
+seed: 42              # with a directory: + a per-hospital offset; this node's quantizer / shuffling RNG
+
+training:
+  rounds: 400         # round limit (the ADMM engines stop earlier once consensus is reached)
+  local_epochs: 2     # gossip baseline only (scikit-learn SGD epochs per round)
+  learning_rate: 0.005  # gossip baseline only
+  test_fraction: 0.25
+  seed: 7
+
+timing:
+  heartbeat_interval_s: 5
+  round_timeout_s: 6
+  round_pause_s: 0.2

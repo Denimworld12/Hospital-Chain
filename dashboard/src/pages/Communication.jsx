@@ -4,6 +4,11 @@ import { EngineChip, Eyebrow, Illustration, SectionHeading, engineInfo, formatBy
 
 const axis = { stroke: "var(--color-ink-black)", strokeWidth: 1 };
 const tick = { fill: "var(--color-ink-black)", fontSize: 12, fontFamily: "var(--font-body)" };
+// tooltip header: the round and how many hospitals were in the chain for it
+const roundLabel = (rows = []) => (round) => {
+  const h = rows.find((r) => r.round === round)?.hospitals;
+  return h != null ? `Round ${round} - ${h} hospitals` : `Round ${round}`;
+};
 const ratio = (a, b) => (a > 0 && b > 0 ? (a / b).toFixed(1) : "-");
 
 function EngineNote({ family, bits, d }) {
@@ -52,6 +57,14 @@ export default function Communication({ snapshot }) {
             <div className="card comm-counter">
               <p className="display-number" data-testid="bytes-this-round">{formatBytes(sent)}</p>
               <p className="comm-counter__unit">bytes across {c.messages_this_round || 0} updates (measured payload)</p>
+              <p className="comm-counter__chain" data-testid="comm-chain">
+                {c.hospitals || 0} hospital{c.hospitals === 1 ? "" : "s"}, {c.links || 0} link{c.links === 1 ? "" : "s"} in the chain now:
+                each round sends 2 x {c.links || 0} = {c.packets_per_round || 0} packets
+                {c.hospitals_this_round != null && c.hospitals_this_round !== c.hospitals && (
+                  <> (round {c.round} ran with {c.hospitals_this_round})</>
+                )}
+                .
+              </p>
               {c.failed_this_round > 0 && (
                 <p className="comm-counter__failed">
                   {c.failed_this_round} send{c.failed_this_round === 1 ? "" : "s"} to unreachable neighbours this round (0 bytes delivered)
@@ -111,7 +124,7 @@ export default function Communication({ snapshot }) {
             <BarChart data={c.per_round || []} margin={{ top: 12, right: 12, bottom: 0, left: 0 }} barGap={2}>
               <XAxis dataKey="round" axisLine={axis} tickLine={axis} tick={tick} />
               <YAxis axisLine={axis} tickLine={axis} tick={tick} width={56} />
-              <Tooltip cursor={{ fill: "rgba(255, 196, 0, 0.12)" }} contentStyle={{ border: "1px solid #000", borderRadius: 8, fontFamily: "var(--font-body)" }} />
+              <Tooltip cursor={{ fill: "rgba(255, 196, 0, 0.12)" }} labelFormatter={roundLabel(c.per_round)} contentStyle={{ border: "1px solid #000", borderRadius: 8, fontFamily: "var(--font-body)" }} />
               <Legend wrapperStyle={{ fontFamily: "var(--font-label)", fontSize: 12, letterSpacing: "0.133em", textTransform: "uppercase" }} />
               <Bar dataKey="ref32_bytes" name="32-bit would cost" fill="var(--mc-bar-full)" isAnimationActive={false} />
               <Bar dataKey="bytes" name="Actually sent" fill="var(--mc-bar-sent)" isAnimationActive={false} />

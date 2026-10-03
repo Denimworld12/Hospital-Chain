@@ -16,10 +16,14 @@ RUN python -m node.assess.train_tabular --csv /tmp/cardio_train.csv --out /app/m
 
 FROM base
 COPY node /app/node
+# the same image runs the directory service (python -m directory) and issues the demo keys
+COPY directory /app/directory
+COPY scripts/pki.py /app/scripts/pki.py
 COPY models/ecg-resnet18.onnx /app/models/ecg-resnet18.onnx
 COPY --from=risk-model /app/models/heart-risk.joblib /app/models/heart-risk.joblib
-# No training data and no config baked in: docker-compose mounts this node's own
-# config and only this node's own data slice.
+# No training data, no config and no keys baked in: docker-compose mounts this node's
+# own config, only this node's own data slice, and the keys from scripts/pki.py.
+# The healthcheck is local liveness only (127.0.0.1), so it skips certificate checks.
 HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=5 \
-  CMD python -c "import os,urllib.request,yaml;c=yaml.safe_load(open(os.environ['NODE_CONFIG']));urllib.request.urlopen(f'http://127.0.0.1:{c[\"port\"]}/health',timeout=2)"
+  CMD python -c "import os,ssl,urllib.request,yaml;c=yaml.safe_load(open(os.environ['NODE_CONFIG']));s='https' if c.get('tls') else 'http';urllib.request.urlopen(f'{s}://127.0.0.1:{c[\"port\"]}/health',timeout=2,context=ssl._create_unverified_context())"
 CMD ["python", "-m", "node"]

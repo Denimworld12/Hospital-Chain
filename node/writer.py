@@ -12,7 +12,7 @@ log = logging.getLogger("medchain.db")
 
 WRITE_METHODS = {
     "ensure_schema", "register_node", "heartbeat", "create_run", "round_started", "round_finished",
-    "update_sent", "record_metrics", "audit",
+    "update_sent", "record_metrics", "audit", "membership",
 }
 
 

@@ -23,7 +23,9 @@ def trainer(node="hospital-a"):
 def test_slices_are_real_uci_non_iid_splits():
     manifest = json.loads((SLICES / "manifest.json").read_text())
     counts = {k: v["patients"] for k, v in manifest["slices"].items()}
-    assert counts == {"hospital-a": 303, "hospital-b": 294, "hospital-c": 200}
+    assert counts == {"hospital-a": 303, "hospital-b": 294, "hospital-c": 200, "hospital-d": 62, "hospital-e": 61}
+    # d and e are the two halves (alternating rows) of the one Swiss file: together, all of it
+    assert "half 1 of 2" in manifest["slices"]["hospital-d"]["institution"]
     rates = [v["positive_rate"] for v in manifest["slices"].values()]
     assert max(rates) - min(rates) > 0.3, "slices should differ in disease prevalence (non-IID)"
     for node, n in counts.items():

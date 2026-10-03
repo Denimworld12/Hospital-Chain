@@ -10,11 +10,24 @@ GADMM). The ADMM engines also read `chain` (node order 1..N),
 `checkpoint_dir` and `seed` (the node's RNG uses seed + its chain position).
 The optional `assess` block overrides where the risk-assessment models are read from.
 
+Membership comes from one of two places:
+    static      `chain:` plus `neighbours:` (each with an optional `public_key`), as before
+    directory   a `directory:` block (url, this hospital's credential, the directory's
+                public key): the node registers at start and the directory's signed
+                membership documents set its chain and neighbours (node/membership.py).
+                `chain`/`neighbours` are then left out.
+
+Security (both optional for local development; the shipped compose stack and the
+provisioning kits always set them): `tls:` (cert, key, ca) serves HTTPS and verifies
+peers against the network CA, and `signing_key:` is this node's Ed25519 key. A node
+with a signing key signs every /update and /snapshot it sends and rejects any update
+whose sender it has no public key for, or whose signature does not verify.
+
 Addresses are deployment, not identity, so they can be overridden from the
 environment without editing the YAML: $MEDCHAIN_ADVERTISE_URL replaces
 `advertise_url`, and $MEDCHAIN_PEER_<ID>_URL replaces the `url` of neighbour <ID>
 (upper-cased, every run of other characters as `_`: hospital-b ->
-MEDCHAIN_PEER_HOSPITAL_B_URL). That is how the same config points at Docker
+MEDCHAIN_PEER_HOSPITAL_B_URL), and $MEDCHAIN_DIRECTORY_URL replaces `directory.url`. That is how the same config points at Docker
 service names on one machine and at LAN IPs or Tailscale names across machines.
 """
 
@@ -32,6 +45,31 @@ import yaml
 class Neighbour:
     id: str
     url: str
+    public_key: str | None = None  # base64 Ed25519 key that verifies this neighbour's signatures
+
+
+@dataclass(frozen=True)
+class TlsConfig:
+    cert: str
+    key: str
+    ca: str  # the network CA that issued every node's (and the directory's) certificate
+
+
+@dataclass(frozen=True)
+class DirectoryConfig:
+    url: str
+    credential_ref: str  # this hospital's pre-shared registration credential, inline or `file:<path>`
+    public_key_ref: str  # base64 Ed25519 key that verifies the directory's documents, inline or `file:<path>`
+
+    # read when used, not when the config loads, so a config can be inspected away from its key files
+    @property
+    def credential(self) -> str:
+        ref = self.credential_ref
+        return Path(ref[5:]).read_text().strip() if ref.startswith("file:") else ref
+
+    @property
+    def public_key(self) -> str:
+        return _read_key(None, self.public_key_ref)
 
 
 @dataclass(frozen=True)
@@ -57,6 +95,7 @@ ENGINE_ALIASES = {"gossip": GOSSIP, "qgadmm": QGADMM, "gadmm_fp": GADMM_FP}
 ADMM_ENGINES = (QGADMM, GADMM_FP)
 
 ADVERTISE_URL_ENV = "MEDCHAIN_ADVERTISE_URL"
+DIRECTORY_URL_ENV = "MEDCHAIN_DIRECTORY_URL"
 
 
 def peer_url_env(node_id: str) -> str:
@@ -97,6 +136,13 @@ class NodeConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     timing: TimingConfig = field(default_factory=TimingConfig)
     assess: AssessConfig = field(default_factory=AssessConfig)
+    tls: TlsConfig | None = None
+    signing_key: str | None = None
+    directory: DirectoryConfig | None = None
+
+    @property
+    def scheme(self) -> str:
+        return "https" if self.tls else "http"
 
     def neighbour(self, node_id: str) -> Neighbour | None:
         return next((n for n in self.neighbours if n.id == node_id), None)
@@ -115,7 +161,8 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
     if missing:
         raise ValueError(f"{path}: missing required keys {missing}")
     neighbours = tuple(
-        Neighbour(id=str(n["id"]), url=_env_url(path, peer_url_env(str(n["id"])), str(n["url"])))
+        Neighbour(id=str(n["id"]), url=_env_url(path, peer_url_env(str(n["id"])), str(n["url"])),
+                  public_key=_read_key(path, n.get("public_key")))
         for n in raw.get("neighbours") or []
     )
     if any(n.id == raw["node_id"] for n in neighbours):
@@ -128,13 +175,22 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
         raise ValueError(f"{path}: unknown engine {engine!r}; use one of {sorted(ENGINE_ALIASES)}")
     engine = ENGINE_ALIASES[engine]
     chain = tuple(str(c) for c in raw.get("chain") or ())
-    if engine in ADMM_ENGINES:
+    directory = _directory(path, raw.get("directory"))
+    if directory and (chain or neighbours):
+        raise ValueError(f"{path}: with a `directory:` the directory sets the chain; drop `chain`/`neighbours`")
+    if engine in ADMM_ENGINES and not directory:
         _check_chain(path, str(raw["node_id"]), chain, neighbours)
+    tls = TlsConfig(**{k: str(v) for k, v in raw["tls"].items()}) if raw.get("tls") else None
+    advertise_url = _env_url(path, ADVERTISE_URL_ENV, str(raw.get("advertise_url", f"{'https' if tls else 'http'}://{raw['node_id']}:{port}")))
+    scheme = "https" if tls else "http"
+    for url in [advertise_url, *(n.url for n in neighbours), *([directory.url] if directory else [])]:
+        if not url.startswith(f"{scheme}://"):
+            raise ValueError(f"{path}: {url} must be {scheme}:// ({'TLS is on' if tls else 'no `tls:` configured'})")
     return NodeConfig(
         node_id=str(raw["node_id"]),
         display_name=str(raw.get("display_name", raw["node_id"])),
         port=port,
-        advertise_url=_env_url(path, ADVERTISE_URL_ENV, str(raw.get("advertise_url", f"http://{raw['node_id']}:{port}"))),
+        advertise_url=advertise_url,
         data_slice=str(raw["data_slice"]),
         shared_secret=str(raw["shared_secret"]),
         neighbours=neighbours,
@@ -153,7 +209,35 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
         training=TrainingConfig(**(raw.get("training") or {})),
         timing=TimingConfig(**(raw.get("timing") or {})),
         assess=AssessConfig(**(raw.get("assess") or {})),
+        tls=tls,
+        signing_key=str(raw["signing_key"]) if raw.get("signing_key") else None,
+        directory=directory,
     )
+
+
+def _read_key(path, value) -> str | None:
+    """A public key given inline (base64) or as `file:<path>`."""
+    if not value:
+        return None
+    value = str(value)
+    if value.startswith("file:"):
+        from .security import load_public_key, public_key_b64
+
+        return public_key_b64(load_public_key(value[5:]))
+    return value
+
+
+def _directory(path, raw) -> DirectoryConfig | None:
+    if not raw:
+        return None
+    missing = [k for k in ("url", "public_key") if not raw.get(k)]
+    if not (raw.get("credential") or raw.get("credential_file")):
+        missing.append("credential or credential_file")
+    if missing:
+        raise ValueError(f"{path}: directory needs {missing}")
+    credential = str(raw["credential"]) if raw.get("credential") else f"file:{raw['credential_file']}"
+    return DirectoryConfig(url=_env_url(path, DIRECTORY_URL_ENV, str(raw["url"])), credential_ref=credential,
+                           public_key_ref=str(raw["public_key"]))
 
 
 def _env_url(path, var: str, configured: str) -> str:

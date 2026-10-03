@@ -20,6 +20,9 @@ H_SENDER = "X-MedChain-Sender"
 H_CHECKSUM = "X-MedChain-Checksum"
 H_DTYPE = "X-MedChain-Dtype"
 H_SECRET = "X-MedChain-Secret"
+H_RECEIVER = "X-MedChain-Receiver"  # who the packet is for (signed, so it cannot be replayed to another node)
+H_EPOCH = "X-MedChain-Epoch"  # the sender's membership epoch; a newer one makes the receiver fetch it
+H_SIGNATURE = "X-MedChain-Signature"  # Ed25519 over the X-MedChain-* headers and the body (node/security.py)
 # ADMM engines only
 H_SEQ = "X-MedChain-Seq"  # packet sequence number of the sender's theta_hat
 H_BASE = "X-MedChain-Base"  # fingerprint of the snapshot the packet was built on

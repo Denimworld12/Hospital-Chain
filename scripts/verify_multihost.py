@@ -5,9 +5,12 @@ checks the nodes agree on the chain, starts one training run through the first n
 (the start floods peer to peer; this script never coordinates anything), waits for every
 node to finish, and then reports, per hospital and per link, what crossed the network:
 
-    python scripts/verify_multihost.py --secret <shared secret> \\
-        --node http://100.101.1.10:8001 --node http://100.101.1.11:8002 --node http://100.101.1.12:8003 \\
+    python scripts/verify_multihost.py --secret <shared secret> --ca kits/.pki/ca.crt \\
+        --node https://100.101.1.10:8001 --node https://100.101.1.11:8002 --node https://100.101.1.12:8003 \\
         [--database-url postgresql://medchain:medchain@<observer>:5432/medchain] [--json report.json]
+
+Point it at every hospital currently in the chain (any number). `--ca` is the network
+CA (scripts/pki.py) that the nodes' HTTPS certificates are checked against.
 
 Without --database-url the evidence comes from each node's own /status and /metrics
 (rounds completed, neighbour updates heard on time, the last send to each neighbour,
@@ -190,10 +193,10 @@ def print_report(report: Report) -> None:
 
 
 def verify(urls: list[str], secret: str, *, rounds: int | None = None, database_url: str | None = None,
-           timeout: float = 900, start: bool = True) -> Report:
+           timeout: float = 900, start: bool = True, ca: str | None = None) -> Report:
     report = Report()
     urls = [u.rstrip("/") for u in urls]
-    with httpx.Client(timeout=10) as client:
+    with httpx.Client(timeout=10, verify=ca or True) as client:
         try:
             statuses = {u: get(client, u, "/status") for u in urls}
             check_topology(statuses, report)
@@ -219,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--node", action="append", required=True, help="a hospital node's real address (repeat for each)")
     ap.add_argument("--secret", required=True, help="the network's shared secret (to start the run)")
+    ap.add_argument("--ca", help="the network CA certificate for https:// nodes (scripts/pki.py)")
     ap.add_argument("--rounds", type=int, help="round limit for the run (default: the nodes' training.rounds)")
     ap.add_argument("--database-url", help="observer Postgres the nodes write to, for per-link byte counts")
     ap.add_argument("--timeout", type=float, default=900, help="seconds to wait for the run to finish")
@@ -226,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", help="also write the report to this file")
     args = ap.parse_args(argv)
     report = verify(args.node, args.secret, rounds=args.rounds, database_url=args.database_url,
-                    timeout=args.timeout, start=not args.no_start)
+                    timeout=args.timeout, start=not args.no_start, ca=args.ca)
     print_report(report)
     if args.json:
         with open(args.json, "w") as fh:

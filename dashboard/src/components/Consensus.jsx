@@ -23,6 +23,12 @@ export default function ConsensusPanel({ snapshot }) {
               Latest round {c.latest_round ?? "-"}: largest edge residual <strong>{sci(c.latest_max)}</strong>, epsilon {c.epsilon}
               {c.converged_round != null && <> / below epsilon on every edge for 3 rounds by round {c.converged_round}</>}
             </p>
+            {c.epoch_start_round != null && c.epoch_start_round > 1 && (
+              <p className="consensus__meta" data-testid="consensus-epoch">
+                The chain changed at round {c.epoch_start_round} (membership epoch {c.epoch}): {c.edges.length} link
+                {c.edges.length === 1 ? "" : "s"} now, and the consensus check restarted on the new chain.
+              </p>
+            )}
             <ResidualChart series={c.series} edges={c.edges} epsilon={c.epsilon} totalRounds={total} />
           </>
         ) : !gossip ? (
@@ -52,10 +58,13 @@ export function NetworkLoss({ snapshot }) {
       <div className="card consensus__card">
         <div className="consensus__head">
           <h3 className="consensus__title">Network training loss</h3>
-          <span className="consensus__meta">{last ? `round ${last.round}: ${loss(last.loss)}` : "no rounds yet"}</span>
+          <span className="consensus__meta">
+            {last ? `round ${last.round}: ${loss(last.loss)} over ${last.hospitals} hospital${last.hospitals === 1 ? "" : "s"}` : "no rounds yet"}
+          </span>
         </div>
         <p className="consensus__meta">
           Mean training log-loss over all hospitals' own patients, each at its own model, weighted by patients.
+          Each round averages the hospitals in the chain that round, so it recomputes when a hospital joins or leaves.
           One hospital's held-out loss can rise while this falls: agreeing on one model costs a little local fit.
         </p>
         <MetricChart data={series} dataKey="loss" title="" totalRounds={total} domain={["auto", "auto"]} format={loss} />
