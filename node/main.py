@@ -367,7 +367,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
 
         state["fetch"] = asyncio.create_task(go())
 
-    @app.get("/membership")
+    @app.get("/membership", dependencies=peer_only)
     async def membership_get():
         r = runner()
         docs = [d for d in [r.membership, *r._pending] if d is not None and d.signature]

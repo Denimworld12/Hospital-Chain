@@ -315,3 +315,28 @@ def test_a_chain_change_never_applies_mid_round(tmp_path):
     r.state = "completed"
     assert r.offer_membership(Membership(epoch=4, chain=("a", "b"), members=members)) == "applied"
     assert r.membership.epoch == 4 and [n.id for n in r.neighbours] == ["a"]
+
+
+def test_an_address_only_change_never_overtakes_a_scheduled_chain_change(tmp_path):
+    """Pending documents apply strictly in epoch order: a later one waits for every earlier one to be due."""
+    from node.config import load_config
+    from node.db import NullDatabase
+    from node.membership import Member
+    from node.runner import Runner
+    from node.writer import DbWriter
+
+    from chain_harness import write_configs
+
+    cfg = load_config(write_configs(tmp_path, ["a", "b", "c"])["b"])
+    r = Runner(cfg, engine=None, db=DbWriter(NullDatabase()), client=None)
+    members = {m: Member(m, f"http://{m}:1") for m in "abcd"}
+    r.state, r.run_id, r.current_round = "running", "run-1", 3
+    r.membership = Membership(epoch=1, chain=("a", "b", "c"), members=members)
+    grown = Membership(epoch=2, chain=("a", "b", "c", "d"), members=members, run_id="run-1", effective_round=10)
+    assert r.offer_membership(grown) == "scheduled"
+    moved = Membership(epoch=3, chain=("a", "b", "c", "d"), members={**members, "c": Member("c", "http://c:2")})
+    assert r.offer_membership(moved) == "scheduled"
+    assert r._due(4) == [] and r._due(9) == []
+    assert r.membership.epoch == 1 and [n.id for n in r.neighbours] == ["a", "c"]
+    assert [d.epoch for d in r._due(10)] == [2, 3]
+    assert r._pending == []

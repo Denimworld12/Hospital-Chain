@@ -152,8 +152,13 @@ class Runner:
         return "late" if late else "scheduled"
 
     def _due(self, r: int) -> list[Membership]:
-        due = [d for d in self._pending if d.run_id != self.run_id or d.effective_round is None or d.effective_round <= r]
-        self._pending = [d for d in self._pending if d not in due]
+        """The pending documents to apply before round r, in epoch order: none overtakes an earlier one."""
+        n = 0
+        for d in self._pending:
+            if d.run_id == self.run_id and d.effective_round is not None and d.effective_round > r:
+                break
+            n += 1
+        due, self._pending = self._pending[:n], self._pending[n:]
         return due
 
     def _apply_membership(self, doc: Membership, r: int | None) -> None:
