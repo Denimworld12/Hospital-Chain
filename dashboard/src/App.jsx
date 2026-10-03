@@ -105,7 +105,7 @@ export default function App() {
       <main>
         {route === "#/" && (
           <>
-            <Hero engine={snapshot?.engine || "naive gossip baseline"} />
+            <Hero engine={snapshot?.engine || "naive gossip baseline"} hospitals={snapshot?.topology?.chain?.length || null} />
             <WaveDivider fill="var(--color-pure-white)" />
             <Topology snapshot={snapshot} />
           </>

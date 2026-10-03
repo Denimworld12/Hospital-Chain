@@ -4,10 +4,12 @@
     MEDCHAIN_STACK=1 pytest tests/integration
 
 They drive real training runs and really `docker kill` containers. Node identities,
-ports and the engine under test are read from config/*.yaml, not hardcoded, so the
-same suite checks whichever engine the stack runs (`engine: qgadmm`, `gadmm_fp` or
-`gossip`). MEDCHAIN_PORT_OFFSET / MEDCHAIN_CONTAINER_PREFIX let it target a stack
-whose published ports or container names were remapped by a compose override.
+ports and the engine under test are read from config/hospital-*.yaml and the chain from
+the live nodes, not hardcoded, so the same suite checks whichever engine the stack runs
+(`engine: qgadmm`, `gadmm_fp` or `gossip`). MEDCHAIN_PORT_OFFSET / MEDCHAIN_CONTAINER_PREFIX
+/ MEDCHAIN_COMPOSE let it target a stack whose published ports or container names were
+remapped by a compose override. Every node is reached over HTTPS, checked against the
+stack's CA (.pki/ca.crt, written by the compose `pki` service).
 """
 
 from __future__ import annotations
@@ -31,10 +33,15 @@ pytestmark = [
 ]
 
 ROOT = Path(__file__).resolve().parents[2]
-NODES = {c.node_id: c for c in (load_config(p) for p in sorted((ROOT / "config").glob("*.yaml")))}
+# the hospitals a plain `docker compose up` starts; hospital-e (profile `join`) is the one that joins later
+STARTED = os.environ.get("MEDCHAIN_NODES", "hospital-a,hospital-b,hospital-c,hospital-d").split(",")
+ALL = {c.node_id: c for c in (load_config(p) for p in sorted((ROOT / "config").glob("hospital-*.yaml")))}
+NODES = {n: ALL[n] for n in STARTED}
+JOINER = next((n for n in ALL if n not in NODES), None)
 ENGINE = next(iter(NODES.values())).engine
 ADMM = ENGINE in ("qgadmm", "gadmm_fp")
-CHAIN = next(iter(NODES.values())).chain
+CA = os.environ.get("MEDCHAIN_CA", str(ROOT / ".pki" / "ca.crt"))
+COMPOSE = os.environ.get("MEDCHAIN_COMPOSE", "docker compose").split()
 BITS = next(iter(NODES.values())).bits
 LABEL = {"gossip": "naive gossip baseline", "gadmm_fp": "GADMM full precision (float32 deltas)"}.get(ENGINE, f"Q-GADMM (b={BITS})")
 D = 16  # 15 features + bias
@@ -46,18 +53,30 @@ PREFIX = os.environ.get("MEDCHAIN_CONTAINER_PREFIX", "")
 DASHBOARD = os.environ.get("MEDCHAIN_DASHBOARD", f"http://{HOST}:{8080 + PORT_OFFSET}")
 DB_URL = os.environ.get("MEDCHAIN_DB", f"postgresql://medchain:medchain@{HOST}:{5432 + PORT_OFFSET}/medchain")
 DASHBOARD_CONTAINER = PREFIX + os.environ.get("MEDCHAIN_DASHBOARD_CONTAINER", "dashboard")
-# the ADMM kill test kills a TAIL node (even chain position); hospital-b in the 3-node chain
-KILL_NODE = os.environ.get("MEDCHAIN_KILL_NODE", CHAIN[1] if len(CHAIN) > 1 else "hospital-b")
 GOSSIP_ROUNDS = 20
 EPSILON = next(iter(NODES.values())).epsilon
 
 
 def node_url(node_id: str) -> str:
-    return f"http://{HOST}:{NODES[node_id].port + PORT_OFFSET}"
+    return f"https://{HOST}:{ALL[node_id].port + PORT_OFFSET}"
 
 
 def get(url: str, **kw):
-    return httpx.get(url, timeout=5, **kw)
+    return httpx.get(url, timeout=5, verify=CA if url.startswith("https") else True, **kw)
+
+
+def post_node(node_id: str, path: str, **kw):
+    secret = ALL[node_id].shared_secret
+    return httpx.post(f"{node_url(node_id)}{path}", headers={"X-MedChain-Secret": secret}, timeout=30, verify=CA, **kw)
+
+
+def in_chain(rows: list[dict]) -> list[dict]:
+    """Snapshot node rows of hospitals in the chain (a hospital that joined and left keeps its row)."""
+    return [n for n in rows if n.get("in_chain") is not False]
+
+
+def current_chain() -> list[str]:
+    return get(f"{node_url(STARTED[0])}/status").json()["chain"]
 
 
 def wait_until(pred, timeout: float, interval: float = 0.25, what: str = "condition"):
@@ -94,6 +113,12 @@ def all_nodes_healthy() -> bool:
     return all(get(f"{node_url(n)}/health").status_code == 200 for n in NODES)
 
 
+def all_placed() -> bool:
+    """Every started hospital registered with the directory and sees the same chain of all of them."""
+    chains = {tuple(status(n)["chain"]) for n in NODES}
+    return len(chains) == 1 and set(chains.pop()) == set(NODES)
+
+
 def wait_idle(timeout: float = 150):
     """No node is mid-run (earlier tests may still be finishing)."""
     wait_until(lambda: all(metrics(n)["run_state"] not in ("running", "paused") for n in NODES), timeout, what="idle nodes")
@@ -125,6 +150,7 @@ def completed(node_id: str, run_id: str) -> bool:
 @pytest.fixture(scope="module", autouse=True)
 def stack_up():
     wait_until(all_nodes_healthy, 90, what="all nodes healthy")
+    wait_until(all_placed, 60, what="every hospital placed in one chain by the directory")
     wait_until(lambda: get(f"{DASHBOARD}/healthz").status_code == 200, 60, what="dashboard healthy")
     yield
 
@@ -142,23 +168,31 @@ gossip_only = pytest.mark.skipif(ADMM, reason=f"engine {ENGINE} is not the gossi
 
 
 def test_health_and_registration():
-    for node_id, cfg in NODES.items():
+    chain = current_chain()
+    assert chain == sorted(NODES), "no run in progress: the directory keeps its configured order"
+    for node_id in NODES:
         assert get(f"{node_url(node_id)}/health").json() == {"status": "ok", "node_id": node_id}
         s = status(node_id)
         assert s["engine"] == LABEL and s["engine_name"] == ENGINE
-        assert sorted(n["id"] for n in s["neighbours"]) == sorted(n.id for n in cfg.neighbours)
+        assert s["tls"] and s["signed_updates"] and s["in_chain"]
+        i = chain.index(node_id)
+        assert [n["id"] for n in s["neighbours"]] == [chain[j] for j in (i - 1, i + 1) if 0 <= j < len(chain)]
+        assert s["position"] == i + 1
         if ADMM:
-            assert s["chain"] == list(CHAIN) and s["d"] == D
-            assert s["group"] == ("head" if CHAIN.index(node_id) % 2 == 0 else "tail")
+            assert s["chain"] == chain and s["d"] == D
+            assert s["group"] == ("head" if i % 2 == 0 else "tail")
+    with pytest.raises(httpx.HTTPError):  # plain HTTP is not served
+        httpx.get(node_url(STARTED[0]).replace("https", "http", 1) + "/health", timeout=3)
 
     def registered():
         s = snapshot()
-        return s if len(s["nodes"]) == len(NODES) and all(n["status"] == "alive" for n in s["nodes"]) else None
+        members = in_chain(s["nodes"])
+        return s if len(members) == len(NODES) and all(n["status"] == "alive" for n in members) else None
 
     snap = wait_until(registered, 15, what="all nodes registered and alive")
-    assert {n["node_id"] for n in snap["nodes"]} == set(NODES)
-    assert all(n["seconds_since_heartbeat"] < 7 for n in snap["nodes"])
-    assert all(n["engine"] == LABEL for n in snap["nodes"])
+    assert {n["node_id"] for n in in_chain(snap["nodes"])} == set(NODES)
+    assert all(n["seconds_since_heartbeat"] < 7 for n in in_chain(snap["nodes"]))
+    assert all(n["engine"] == LABEL for n in in_chain(snap["nodes"]))
 
 
 def test_dashboard_renders():
@@ -178,7 +212,7 @@ def test_websocket_pushes_live_snapshots():
         second = next(m for m in (json.loads(ws.recv(timeout=5)) for _ in range(20)) if m["type"] == "snapshot")
     assert first["type"] == second["type"] == "snapshot"
     assert second["data"]["generated_at"] > first["data"]["generated_at"]
-    assert {n["node_id"] for n in second["data"]["nodes"]} == set(NODES)
+    assert {n["node_id"] for n in in_chain(second["data"]["nodes"])} == set(NODES)
 
 
 PATIENT = {"age": 58, "gender": "male", "height": 172, "weight": 88, "ap_hi": 150, "ap_lo": 95,
@@ -199,8 +233,8 @@ def test_risk_assessment_on_every_node_and_via_the_dashboard():
     secret = next(iter(NODES.values())).shared_secret
     for node_id in NODES:
         assert get(f"{node_url(node_id)}/status").json()["assess"] == {"tabular": True, "ecg": True}
-        assert httpx.post(f"{node_url(node_id)}/assess", json=PATIENT, timeout=15).status_code == 401
-        r = httpx.post(f"{node_url(node_id)}/assess", json=PATIENT, headers={"X-MedChain-Secret": secret}, timeout=15)
+        assert httpx.post(f"{node_url(node_id)}/assess", json=PATIENT, timeout=15, verify=CA).status_code == 401
+        r = httpx.post(f"{node_url(node_id)}/assess", json=PATIENT, headers={"X-MedChain-Secret": secret}, timeout=15, verify=CA)
         assert r.status_code == 200 and r.json()["node_id"] == node_id
         assert r.json()["risk_tier"] in ("LOW", "MODERATE", "HIGH")
     last = sorted(NODES)[-1]
@@ -227,7 +261,9 @@ def test_training_run_completes_and_is_audited():
             msg = json.loads(ws.recv(timeout=10))
             if msg["type"] == "update":
                 events = [e for e in msg["data"] if e["run_id"] == run_id]
-    assert events and all(NODES[e["receiver"]].neighbour(e["sender"]) for e in events)
+    chain = current_chain()
+    links = {frozenset(p) for p in zip(chain, chain[1:])}
+    assert events and all(frozenset((e["sender"], e["receiver"])) in links for e in events)
     assert {e["payload_bytes"] for e in events if e["status"] == "delivered"} <= {PACKET, 8}
 
     wait_until(lambda: all(completed(n, run_id) for n in NODES), 240, what="run completes on every node")
@@ -237,7 +273,7 @@ def test_training_run_completes_and_is_audited():
     total = rounds[next(iter(NODES))]
     for n, h in hist.items():
         assert [x["round"] for x in h] == list(range(1, total + 1))
-        assert all(x["neighbours_heard"] == len(NODES[n].neighbours) for x in h)
+        assert all(x["neighbours_heard"] == len(status(n)["neighbours"]) for x in h)
         if not ADMM:
             assert h[-1]["loss"] < h[0]["loss"], f"{n} loss did not fall"
     # the objective the hospitals minimise together falls (for the ADMM engines one non-IID hospital's own
@@ -246,7 +282,7 @@ def test_training_run_completes_and_is_audited():
     assert [p["round"] for p in net] == list(range(1, total + 1))
     assert net[-1]["loss"] < net[0]["loss"] - 0.01, "network training loss did not fall"
 
-    edges = sum(len(c.neighbours) for c in NODES.values())
+    edges = sum(len(status(n)["neighbours"]) for n in NODES)
     sent = db_rows("SELECT payload_bytes, full_precision_bytes, bits, status FROM updates_meta WHERE run_id = %s", (run_id,))
     assert len(sent) == edges * total
     assert all(s == "delivered" for *_, s in sent)
@@ -256,8 +292,9 @@ def test_training_run_completes_and_is_audited():
     )
     assert len(audited) == edges * total
     for sender, receiver, payload, checksum, detail in audited:
-        assert NODES[receiver].neighbour(sender) is not None
-        assert len(checksum) == 64 and detail["verified"] is True and detail["engine"] == LABEL
+        assert frozenset((sender, receiver)) in links
+        assert len(checksum) == 64 and detail["verified"] is True and detail["signed"] is True
+        assert detail["engine"] == LABEL
     snap = snapshot()
     assert snap["run"]["run_id"] == run_id and snap["run"]["state"] == "completed" and snap["engine"] == LABEL
 
@@ -287,7 +324,7 @@ def test_training_run_completes_and_is_audited():
         assert c["coordinate_bytes_total"] == sum(max(p - 8, 0) for p, *_ in sent)
     # residuals collapse; the consensus pill's condition holds
     s = snap["consensus"]
-    assert s["edges"] == sorted(f"{a}|{b}" for a, b in zip(CHAIN, CHAIN[1:]))
+    assert s["edges"] == [f"{a}|{b}" for a, b in zip(chain, chain[1:])]
     assert s["epsilon"] == EPSILON and s["converged_round"] is not None
     first = s["series"][0]
     assert max(first[e] for e in s["edges"]) > 100 * EPSILON
@@ -305,18 +342,19 @@ def test_kill_node_turns_orange_and_survivors_keep_training():
     # still visibly training afterwards (a round takes ~0.2s with the configured round_pause_s)
     rounds = 100
     run_id = start_via_dashboard(rounds)
-    survivors = [n for n in NODES if n != KILL_NODE]
+    kill_node = current_chain()[1]
+    survivors = [n for n in NODES if n != kill_node]
     wait_until(lambda: all(rounds_done(n, run_id) >= 3 for n in NODES), 60, what="3 rounds before the kill")
     try:
-        docker("kill", PREFIX + KILL_NODE)
+        docker("kill", PREFIX + kill_node)
         killed_at = time.monotonic()
         wait_until(
-            lambda: next(n for n in snapshot()["nodes"] if n["node_id"] == KILL_NODE)["status"] == "down",
-            12, interval=0.2, what=f"{KILL_NODE} marked down",
+            lambda: next(n for n in snapshot()["nodes"] if n["node_id"] == kill_node)["status"] == "down",
+            12, interval=0.2, what=f"{kill_node} marked down",
         )
         took = time.monotonic() - killed_at
-        print(f"{KILL_NODE} marked down {took:.1f}s after docker kill")
-        assert took <= 10, f"{KILL_NODE} took {took:.1f}s to turn orange"
+        print(f"{kill_node} marked down {took:.1f}s after docker kill")
+        assert took <= 10, f"{kill_node} took {took:.1f}s to turn orange"
         at_kill = {n: rounds_done(n, run_id) for n in survivors}
 
         assert all(at_kill[n] < rounds for n in survivors), f"run finished before the kill was detected: {at_kill}"
@@ -326,14 +364,14 @@ def test_kill_node_turns_orange_and_survivors_keep_training():
             assert metrics(n)["run_state"] == "completed"
         assert all(n["status"] == "alive" for n in snapshot()["nodes"] if n["node_id"] in survivors)
         unreachable = db_rows(
-            "SELECT count(*) FROM updates_meta WHERE run_id = %s AND receiver = %s AND status = 'unreachable'", (run_id, KILL_NODE)
+            "SELECT count(*) FROM updates_meta WHERE run_id = %s AND receiver = %s AND status = 'unreachable'", (run_id, kill_node)
         )[0][0]
         assert unreachable > 0
     finally:
-        docker("start", PREFIX + KILL_NODE)
-        wait_until(lambda: get(f"{node_url(KILL_NODE)}/health").status_code == 200, 60, what=f"{KILL_NODE} back up")
-        wait_until(lambda: next(n for n in snapshot()["nodes"] if n["node_id"] == KILL_NODE)["status"] == "alive", 20,
-                   what=f"{KILL_NODE} alive again")
+        docker("start", PREFIX + kill_node)
+        wait_until(lambda: get(f"{node_url(kill_node)}/health").status_code == 200, 60, what=f"{kill_node} back up")
+        wait_until(lambda: next(n for n in snapshot()["nodes"] if n["node_id"] == kill_node)["status"] == "alive", 20,
+                   what=f"{kill_node} alive again")
 
 
 @admm_only
@@ -341,59 +379,60 @@ def test_kill_a_tail_mid_round_heads_continue_and_it_rejoins_from_its_checkpoint
     """docker kill a TAIL node mid-run; the heads keep training; on restart it reloads its checkpoint,
     resyncs its mirrors with one GET /snapshot per neighbour, rejoins at the current round, and the
     residuals resume falling to consensus."""
-    assert CHAIN.index(KILL_NODE) % 2 == 1, f"{KILL_NODE} is not a TAIL node"
-    heads = [n for n in NODES if n != KILL_NODE and KILL_NODE in {x.id for x in NODES[n].neighbours}]
+    chain = current_chain()
+    kill_node = chain[1]  # position 2: a TAIL
+    heads = [chain[0], chain[2]]
     wait_idle()
     # a larger round budget than the default: while the tail is down the heads run on alone (tens of
     # rounds), and after the rejoin the chain needs roughly a fresh run's worth of rounds to agree again
     budget = 400
     run_id = start_via_dashboard(budget)
-    wait_until(lambda: rounds_done(KILL_NODE, run_id) >= 12, 90, what=f"{KILL_NODE} past round 12 (a checkpoint exists)")
+    wait_until(lambda: rounds_done(kill_node, run_id) >= 12, 90, what=f"{kill_node} past round 12 (a checkpoint exists)")
     try:
-        docker("kill", PREFIX + KILL_NODE)
+        docker("kill", PREFIX + kill_node)
         killed_at = time.monotonic()
         at_kill = {n: rounds_done(n, run_id) for n in heads}
-        wait_until(lambda: next(n for n in snapshot()["nodes"] if n["node_id"] == KILL_NODE)["status"] == "down",
-                   12, interval=0.2, what=f"{KILL_NODE} marked down")
-        print(f"{KILL_NODE} marked down {time.monotonic() - killed_at:.1f}s after docker kill; heads at {at_kill}")
+        wait_until(lambda: next(n for n in snapshot()["nodes"] if n["node_id"] == kill_node)["status"] == "down",
+                   12, interval=0.2, what=f"{kill_node} marked down")
+        print(f"{kill_node} marked down {time.monotonic() - killed_at:.1f}s after docker kill; heads at {at_kill}")
         wait_until(lambda: all(rounds_done(n, run_id) >= at_kill[n] + 5 for n in heads), 60, what="heads keep training")
         for n in heads:
             assert metrics(n)["run_state"] == "running"
     finally:
-        docker("start", PREFIX + KILL_NODE)
-    wait_until(lambda: get(f"{node_url(KILL_NODE)}/health").status_code == 200, 90, what=f"{KILL_NODE} back up")
+        docker("start", PREFIX + kill_node)
+    wait_until(lambda: get(f"{node_url(kill_node)}/health").status_code == 200, 90, what=f"{kill_node} back up")
 
     def rejoined():
         rows = db_rows("SELECT round, detail FROM audit_logs WHERE run_id = %s AND node_id = %s AND event = 'rejoined_from_checkpoint'",
-                       (run_id, KILL_NODE))
+                       (run_id, kill_node))
         return rows[0] if rows else None
 
-    rejoin_round, detail = wait_until(rejoined, 60, what=f"{KILL_NODE} rejoined from its checkpoint")
-    print(f"{KILL_NODE} rejoined at round {rejoin_round}: {detail}")
-    assert detail["checkpoint_round"] >= 10 and detail["checkpoint_round"] % NODES[KILL_NODE].checkpoint_every == 0
+    rejoin_round, detail = wait_until(rejoined, 60, what=f"{kill_node} rejoined from its checkpoint")
+    print(f"{kill_node} rejoined at round {rejoin_round}: {detail}")
+    assert detail["checkpoint_round"] >= 10 and detail["checkpoint_round"] % ALL[kill_node].checkpoint_every == 0
     assert rejoin_round > max(at_kill.values())
     assert sorted(detail["resynced_from"]) == sorted(heads)
     resyncs = db_rows("SELECT sender, payload_bytes, detail FROM audit_logs WHERE run_id = %s AND node_id = %s "
-                      "AND event = 'snapshot_resync'", (run_id, KILL_NODE))
+                      "AND event = 'snapshot_resync'", (run_id, kill_node))
     assert sorted(s for s, _, _ in resyncs) == sorted(heads)
     assert all(p == 3 * D * 8 and d["reason"] == "rejoin after restart" for _, p, d in resyncs)  # byte cost audited
     served = db_rows("SELECT node_id, receiver FROM audit_logs WHERE run_id = %s AND event = 'snapshot_served'", (run_id,))
-    assert {(n, r) for n, r in served} >= {(h, KILL_NODE) for h in heads}
+    assert {(n, r) for n, r in served} >= {(h, kill_node) for h in heads}
     degraded = db_rows("SELECT DISTINCT node_id FROM audit_logs WHERE run_id = %s AND event = 'round_degraded'", (run_id,))
     assert {h for (h,) in degraded} >= set(heads), "heads should log degraded rounds while the tail is down"
 
     wait_until(lambda: all(completed(n, run_id) for n in NODES), 240, what="run completes after the rejoin")
     final = {n: status(n)["current_round"] for n in NODES}
     assert len(set(final.values())) == 1, f"nodes stopped on different rounds: {final}"
-    hist = metrics(KILL_NODE)["history"]
+    hist = metrics(kill_node)["history"]
     assert hist[0]["round"] == rejoin_round
     # residuals resume falling: from the post-rejoin disagreement down to consensus
     assert max(h["max_residual"] for h in hist[:5]) > 10 * EPSILON
-    assert final[KILL_NODE] < budget, "no consensus after the rejoin (hit the round limit)"
+    assert final[kill_node] < budget, "no consensus after the rejoin (hit the round limit)"
     assert hist[-1]["max_residual"] < 10 * EPSILON
     snap = snapshot()
     assert snap["consensus"]["converged_round"] is not None and snap["consensus"]["converged_round"] > rejoin_round
-    assert next(n for n in snap["nodes"] if n["node_id"] == KILL_NODE)["status"] == "alive"
+    assert next(n for n in snap["nodes"] if n["node_id"] == kill_node)["status"] == "alive"
 
 
 def test_killing_the_dashboard_does_not_affect_training():
@@ -407,7 +446,7 @@ def test_killing_the_dashboard_does_not_affect_training():
         wait_until(lambda: all(completed(n, run_id) for n in NODES), 240, what="run completes with dashboard dead")
         for n in NODES:
             hist = metrics(n)["history"]
-            assert all(h["neighbours_heard"] == len(NODES[n].neighbours) for h in hist), f"{n} lost neighbours"
+            assert all(h["neighbours_heard"] == len(status(n)["neighbours"]) for h in hist), f"{n} lost neighbours"
             assert not any(h.get("degraded") for h in hist), f"{n} had degraded rounds"
     finally:
         docker("start", DASHBOARD_CONTAINER)
@@ -415,3 +454,92 @@ def test_killing_the_dashboard_does_not_affect_training():
     # the observer catches up from Postgres after restart
     assert wait_until(lambda: snapshot()["run"]["run_id"] == run_id and snapshot()["run"]["state"] == "completed", 15,
                       what="dashboard shows the completed run")
+
+
+def compose(*args: str) -> None:
+    subprocess.run([*COMPOSE, *args], check=True, capture_output=True, text=True, cwd=ROOT)
+
+
+@admm_only
+@pytest.mark.skipif(JOINER is None, reason="no spare hospital config to join")
+def test_a_hospital_joins_mid_run_then_a_middle_hospital_leaves_and_the_dashboard_follows():
+    """Chain of 4 -> hospital-e joins mid-run (appended) -> hospital-b leaves (a and c bridge) -> converges.
+
+    Checked from outside, the way an operator sees it: the nodes' /status, the observer database and
+    the dashboard's snapshot (topology, consensus, network training loss, communication)."""
+    wait_idle()
+    start_chain = current_chain()
+    leaver = start_chain[1]
+    run_id = start_via_dashboard(400)
+    try:
+        wait_until(lambda: rounds_done(start_chain[0], run_id) >= 3, 60, what="the run is going")
+        compose("--profile", "join", "up", "-d", JOINER)
+
+        # -- join: appended at the end, at a round boundary, then trained with the others
+        joined = wait_until(lambda: db_rows("SELECT round, detail FROM audit_logs WHERE run_id = %s AND node_id = %s "
+                                            "AND event = 'joined_run'", (run_id, JOINER)), 90, what=f"{JOINER} joins")
+        join_round, detail = joined[0]
+        five = start_chain + [JOINER]
+        assert detail["chain"] == five and detail["start_round"] == join_round
+        for n in start_chain:  # every member switched on that same boundary (written when it reaches it)
+            changed = wait_until(lambda: db_rows("SELECT round FROM audit_logs WHERE run_id = %s AND node_id = %s "
+                                                 "AND event = 'membership_changed'", (run_id, n)), 60,
+                                 what=f"{n} reaches the boundary")
+            assert [r for (r,) in changed] == [join_round], f"{n} switched on a different round"
+
+        def after_join():
+            s = snapshot()
+            return s if s["topology"]["chain"] == five and s["comm"]["hospitals_this_round"] == 5 else None
+
+        s = wait_until(after_join, 60, what="the dashboard shows five hospitals")
+        assert s["topology"]["links"] == [f"{a}|{b}" for a, b in zip(five, five[1:])]
+        assert s["consensus"]["edges"] == s["topology"]["links"]  # the new pair line appears
+        assert s["consensus"]["epoch_start_round"] == join_round and not s["consensus"]["reached"]
+        assert s["consensus"]["converged_round"] is None  # reset by the membership change
+        assert s["comm"]["hospitals"] == 5 and s["comm"]["links"] == 4 and s["comm"]["packets_per_round"] == 8
+        by_round = {r["round"]: r for r in s["comm"]["per_round"]}
+        assert by_round[join_round - 1]["hospitals"] == 4 and by_round[join_round - 1]["messages"] == 6
+        net = {p["round"]: p["hospitals"] for p in s["network_loss"]}
+        assert net[join_round - 1] == 4 and net[join_round] == 5  # the weighted average now spans five hospitals
+
+        wait_until(lambda: rounds_done(JOINER, run_id) >= 10, 60, what=f"{JOINER} trains")
+
+        # -- planned departure of a middle hospital: its neighbours bridge
+        subprocess.run(["docker", "exec", PREFIX + leaver, "python", "-m", "node.leave"], check=True,
+                       capture_output=True, text=True)
+        four = [n for n in five if n != leaver]
+        left = wait_until(lambda: db_rows("SELECT round FROM audit_logs WHERE run_id = %s AND node_id = %s AND "
+                                          "event = 'left_chain'", (run_id, leaver)), 60, what=f"{leaver} leaves")
+        leave_round = left[0][0]
+
+        def after_leave():
+            s = snapshot()
+            return s if s["topology"]["chain"] == four and s["comm"]["hospitals_this_round"] == 4 else None
+
+        s = wait_until(after_leave, 60, what="the dashboard shows the bridged chain")
+        assert leaver in s["topology"]["left"]
+        assert s["consensus"]["edges"] == [f"{a}|{b}" for a, b in zip(four, four[1:])]  # a|b, b|c gone; a|c new
+        assert s["consensus"]["epoch_start_round"] == leave_round and s["consensus"]["converged_round"] is None
+        assert s["comm"]["hospitals"] == 4 and s["comm"]["links"] == 3
+        net = {p["round"]: p["hospitals"] for p in s["network_loss"]}
+        assert net[leave_round - 1] == 5 and net[leave_round] == 4
+        assert status(leaver)["run_state"] == "left" and not status(leaver)["in_chain"]
+
+        # -- and training keeps converging, to consensus on the new chain
+        wait_until(lambda: all(completed(n, run_id) for n in four), 300, what="the bridged chain finishes")
+        final = {n: status(n)["current_round"] for n in four}
+        assert len(set(final.values())) == 1 and max(final.values()) < 400, f"no consensus: {final}"
+        s = snapshot()
+        assert s["consensus"]["reached"] and s["consensus"]["converged_round"] > leave_round
+        assert all(s["consensus"]["series"][-1][e] < EPSILON for e in s["consensus"]["edges"])
+        assert s["network_loss"][-1]["hospitals"] == 4
+        bridge = db_rows("SELECT node_id, sender, payload_bytes FROM audit_logs WHERE run_id = %s AND "
+                         "event = 'snapshot_resync' AND round = %s", (run_id, leave_round))
+        a, c = start_chain[0], start_chain[2]
+        assert {(n, snd) for n, snd, _ in bridge} >= {(a, c), (c, a)}  # full snapshot both ways over the new link
+    finally:
+        # back to the four-hospital stack for whoever runs next: the joiner leaves, the leaver re-registers
+        subprocess.run(["docker", "exec", PREFIX + JOINER, "python", "-m", "node.leave"], capture_output=True)
+        compose("--profile", "join", "stop", JOINER)
+        docker("restart", PREFIX + leaver)
+        wait_until(all_placed, 120, what="the original chain is back")

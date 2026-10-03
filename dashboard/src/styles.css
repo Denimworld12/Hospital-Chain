@@ -482,6 +482,16 @@ a {
   fill: var(--color-ink-black);
 }
 
+/* six or more hospitals: smaller labels so neighbouring names do not collide */
+.topo--dense .topo__name {
+  font-size: 12px;
+  letter-spacing: 0.12em;
+}
+
+.topo--dense .topo__meta {
+  font-size: 11px;
+}
+
 .topo__node[data-status="down"] .topo__meta {
   fill: var(--color-burnt-orange);
 }
@@ -500,6 +510,10 @@ a {
   display: inline-flex;
   align-items: center;
   gap: var(--spacing-8);
+}
+
+.topo__legend-left {
+  color: var(--color-burnt-orange);
 }
 
 .topology__accent {
@@ -710,6 +724,11 @@ a {
   letter-spacing: var(--mc-eyebrow-tracking);
   text-transform: uppercase;
   margin: 0 0 var(--spacing-16);
+}
+
+.comm-counter__chain {
+  font-size: var(--text-body-sm);
+  margin: 0 0 var(--spacing-12);
 }
 
 .comm-counter__failed {

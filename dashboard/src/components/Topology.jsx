@@ -7,39 +7,9 @@ import ecg from "@assets/ecg-wave.svg";
 import { useEffect, useRef, useState } from "react";
 import { Illustration, SectionHeading, StatusDot } from "./ui.jsx";
 import { subscribeUpdates } from "../useSnapshot.js";
+import { H, W, chainLinks, chainMembers, layout } from "../topologyLayout.js";
 
-const W = 1000;
-const H = 470;
-const TILTS = [-6, 5, -5, 7, -7];
-
-// Lay nodes out along a gentle arc. Everything comes from the snapshot, so a
-// config with a different number of hospitals draws without code changes.
-function layout(nodes) {
-  const n = nodes.length;
-  return nodes.map((node, i) => {
-    const t = n === 1 ? 0.5 : i / (n - 1);
-    const x = 150 + t * (W - 300);
-    const y = 300 - Math.sin(Math.PI * t) * 90;
-    const art = n > 2 && i === Math.floor(n / 2) ? hospitalLg : n > 4 ? hospitalSm : hospitalMd;
-    const size = art === hospitalLg ? 230 : art === hospitalMd ? 180 : 130;
-    return { ...node, x, y, art, size, tilt: TILTS[i % TILTS.length] };
-  });
-}
-
-function edges(placed) {
-  const byId = Object.fromEntries(placed.map((p) => [p.node_id, p]));
-  const seen = new Set();
-  const out = [];
-  for (const p of placed) {
-    for (const nb of p.neighbours || []) {
-      const key = [p.node_id, nb].sort().join("|");
-      if (seen.has(key) || !byId[nb]) continue;
-      seen.add(key);
-      out.push([p, byId[nb]]);
-    }
-  }
-  return out;
-}
+const ART = { lg: hospitalLg, md: hospitalMd, sm: hospitalSm };
 
 function Envelope({ x, y, rot, flying = false }) {
   return (
@@ -111,24 +81,27 @@ function useFlights() {
 
 export default function Topology({ snapshot }) {
   const nodes = snapshot?.nodes || [];
-  const placed = layout(nodes);
-  const links = edges(placed);
+  const topology = snapshot?.topology || { chain: [], links: [], left: [] };
+  const placed = layout(chainMembers(topology, nodes));
+  const links = chainLinks(placed);
   const centre = placed[Math.floor(placed.length / 2)];
-  const alive = nodes.filter((n) => n.status === "alive").length;
+  const alive = placed.filter((n) => n.status === "alive").length;
+  const left = nodes.filter((n) => (topology.left || []).includes(n.node_id));
   const { flights, now } = useFlights();
 
   return (
     <section className="topology section section--white" id="topology">
       <div className="page">
         <SectionHeading
-          eyebrow={`${alive} of ${nodes.length} nodes alive / heartbeat every 5s`}
+          eyebrow={`${alive} of ${placed.length} hospitals in the chain alive${topology.epoch != null ? ` / membership epoch ${topology.epoch}` : ""} / heartbeat every 5s`}
           title="Network topology"
           tagline="each hospital talks only to its neighbours"
         />
-        {nodes.length === 0 ? (
+        {placed.length === 0 ? (
           <p className="empty">Waiting for hospital nodes to register...</p>
         ) : (
-          <svg className="topo" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Hospital network topology">
+          <svg className={`topo${placed.some((p) => p.dense) ? " topo--dense" : ""}`} viewBox={`0 0 ${W} ${H}`} role="img"
+            aria-label={`Hospital network topology: a chain of ${placed.length}`} data-chain={topology.chain.join(",")}>
             {centre && (
               <image href={blobGold} x={centre.x - 170} y={centre.y - 205} width="340" height="320" className="topo__blob" />
             )}
@@ -153,9 +126,10 @@ export default function Topology({ snapshot }) {
               );
             })}
             {placed.map((p) => (
-              <g key={p.node_id} className="topo__node" data-node={p.node_id} data-status={p.status}>
+              <g key={p.node_id} className="topo__node" data-node={p.node_id} data-status={p.status} data-position={p.position}
+                data-role={p.role}>
                 <image
-                  href={p.art}
+                  href={ART[p.art]}
                   x={p.x - p.size / 2}
                   y={p.y - p.size * 0.72}
                   width={p.size}
@@ -168,16 +142,26 @@ export default function Topology({ snapshot }) {
                   {p.display_name}
                 </text>
                 <text x={p.x} y={p.y + p.size * 0.28 + 30} className="topo__meta" textAnchor="middle">
-                  {p.patients} patients / {p.status === "alive" ? `round ${p.current_round || 0}` : `down ${Math.round(p.seconds_since_heartbeat || 0)}s`}
+                  {p.position}. {p.role} / {p.status === "alive" ? `round ${p.current_round || 0}` : `down ${Math.round(p.seconds_since_heartbeat || 0)}s`}
                 </text>
+                {!p.dense && p.patients != null && (
+                  <text x={p.x} y={p.y + p.size * 0.28 + 50} className="topo__meta" textAnchor="middle">
+                    {p.patients} patients
+                  </text>
+                )}
               </g>
             ))}
           </svg>
         )}
         <ul className="topo__legend">
-          {nodes.map((n) => (
+          {placed.map((n) => (
             <li key={n.node_id}>
-              <StatusDot status={n.status} label={false} /> {n.display_name}: {n.status === "alive" ? "alive" : "down"}
+              <StatusDot status={n.status} label={false} /> {n.position}. {n.display_name} ({n.role}): {n.status === "alive" ? "alive" : "down"}
+            </li>
+          ))}
+          {left.map((n) => (
+            <li key={n.node_id} className="topo__legend-left" data-left={n.node_id}>
+              <StatusDot status="down" label={false} /> {n.display_name}: left the chain
             </li>
           ))}
         </ul>

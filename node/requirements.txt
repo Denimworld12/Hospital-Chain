@@ -7,6 +7,8 @@ numpy==2.2.1
 scikit-learn==1.6.0
 psycopg[binary]==3.2.3
 PyYAML==6.0.2
+# TLS certificates (scripts/pki.py) and Ed25519 update / membership signatures (node/security.py)
+cryptography==44.0.0
 torch==2.5.1
 # per-patient risk assessment (node/assess/); xgboost-cpu is the CPU-only Linux
 # wheel (no CUDA/NCCL), the plain wheel elsewhere. Both install the xgboost module.

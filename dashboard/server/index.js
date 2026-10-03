@@ -48,10 +48,12 @@ async function readJson(req) {
   }
 }
 
-// Relay a button press to one alive node; the node floods it to its neighbours.
+// Relay a button press to one alive chain member; the node floods it to its neighbours.
+// (A hospital that left the chain has no neighbours to flood to, so it is skipped.)
 async function relay(action, body) {
   const { rows } = await pool.query(
-    `SELECT node_id, url FROM nodes WHERE last_heartbeat > now() - make_interval(secs => $1) ORDER BY node_id`,
+    `SELECT node_id, url FROM nodes WHERE last_heartbeat > now() - make_interval(secs => $1) AND in_chain IS NOT FALSE
+      ORDER BY node_id`,
     [STALE_AFTER_S],
   );
   if (!rows.length) return { status: 503, body: { detail: "No hospital node is alive." } };

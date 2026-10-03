@@ -12,3 +12,5 @@ models/heart-risk.joblib
 data/ecg-images/
 # per-hospital node kits written by scripts/provision.py (they contain the shared secret)
 kits/
+# keys and certificates issued by scripts/pki.py (the compose stack writes them on first start)
+.pki/

@@ -1,12 +1,18 @@
-# MedChain: three hospital nodes + postgres + observer dashboard.
+# MedChain: a chain of hospital nodes + a membership directory + postgres + observer dashboard.
 #
-#   docker compose up --build        then open http://localhost:8080
+#   docker compose up --build        four hospitals (A - B - C - D); open http://localhost:8080
+#   docker compose --profile join up -d hospital-e      a fifth hospital joins, mid-run if one is going
+#   docker compose exec hospital-b python -m node.leave  hospital-b leaves; A and C bridge to each other
 #
-# All three nodes run the same image; the mounted YAML config decides identity.
-# Each node mounts ONLY its own data slice - raw patient rows never leave the
-# container that holds them. Only model updates travel between nodes. The ADMM
-# engines checkpoint their own model state to a per-node volume, so a killed node
-# rejoins its run on restart.
+# Every node runs the same image; the mounted YAML config decides which hospital it is.
+# Where it sits in the chain comes from the directory, which coordinates membership
+# (joins, planned leaves) and nothing else: it never sees model weights, and training
+# keeps going if it is down. Each node mounts ONLY its own data slice - raw patient rows
+# never leave the container that holds them. Only model updates travel between
+# neighbouring nodes, over TLS, each signed with the sender's key. The ADMM engines
+# checkpoint their own model state to a per-node volume, so a killed node rejoins its
+# run on restart. The `pki` service issues the demo CA, certificates, signing keys and
+# directory credentials into ./.pki on first start (scripts/pki.py; kept on later starts).
 
 x-node: &node
   build:
@@ -15,9 +21,13 @@ x-node: &node
   image: medchain-node:latest
   environment: &node-env
     DATABASE_URL: postgresql://medchain:medchain@postgres:5432/medchain
-  depends_on:
+  depends_on: &node-deps
     postgres:
       condition: service_healthy
+    pki:
+      condition: service_completed_successfully
+    directory:
+      condition: service_started
   restart: "no"
 
 services:
@@ -36,6 +46,50 @@ services:
       timeout: 3s
       retries: 30
 
+  pki:
+    image: medchain-node:latest
+    build:
+      context: .
+      dockerfile: node/Dockerfile
+    container_name: medchain-pki
+    command:
+      - python
+      - scripts/pki.py
+      - --out=/pki
+      - --directory=directory:directory,localhost,127.0.0.1
+      - --hospital=hospital-a:hospital-a,localhost,127.0.0.1
+      - --hospital=hospital-b:hospital-b,localhost,127.0.0.1
+      - --hospital=hospital-c:hospital-c,localhost,127.0.0.1
+      - --hospital=hospital-d:hospital-d,localhost,127.0.0.1
+      - --hospital=hospital-e:hospital-e,localhost,127.0.0.1
+    volumes:
+      - ./.pki:/pki
+    restart: "no"
+
+  # Membership only: decides where a hospital goes and who bridges when one leaves. Its own
+  # SQLite store (the directory-data volume), not the dashboard's Postgres.
+  directory:
+    image: medchain-node:latest
+    container_name: directory
+    command: ["python", "-m", "directory"]
+    environment:
+      DIRECTORY_CONFIG: /config/directory.yaml
+    volumes:
+      - ./config/directory.yaml:/config/directory.yaml:ro
+      - ./.pki:/pki:ro
+      - directory-data:/data
+    depends_on:
+      pki:
+        condition: service_completed_successfully
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import ssl,urllib.request;urllib.request.urlopen('https://127.0.0.1:8100/health',timeout=2,context=ssl._create_unverified_context())"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: "no"
+
   hospital-a:
     <<: *node
     container_name: hospital-a
@@ -45,6 +99,7 @@ services:
     volumes:
       - ./config/hospital-a.yaml:/config/hospital-a.yaml:ro
       - ./data/slices/hospital-a.csv:/data/hospital-a.csv:ro
+      - ./.pki:/pki:ro
       - checkpoints-a:/checkpoints
     ports:
       - "8001:8001"
@@ -58,6 +113,7 @@ services:
     volumes:
       - ./config/hospital-b.yaml:/config/hospital-b.yaml:ro
       - ./data/slices/hospital-b.csv:/data/hospital-b.csv:ro
+      - ./.pki:/pki:ro
       - checkpoints-b:/checkpoints
     ports:
       - "8002:8002"
@@ -71,9 +127,40 @@ services:
     volumes:
       - ./config/hospital-c.yaml:/config/hospital-c.yaml:ro
       - ./data/slices/hospital-c.csv:/data/hospital-c.csv:ro
+      - ./.pki:/pki:ro
       - checkpoints-c:/checkpoints
     ports:
       - "8003:8003"
+
+  hospital-d:
+    <<: *node
+    container_name: hospital-d
+    environment:
+      <<: *node-env
+      NODE_CONFIG: /config/hospital-d.yaml
+    volumes:
+      - ./config/hospital-d.yaml:/config/hospital-d.yaml:ro
+      - ./data/slices/hospital-d.csv:/data/hospital-d.csv:ro
+      - ./.pki:/pki:ro
+      - checkpoints-d:/checkpoints
+    ports:
+      - "8004:8004"
+
+  # Not started by a plain `docker compose up`: start it to watch a hospital join a running chain.
+  hospital-e:
+    <<: *node
+    profiles: ["join"]
+    container_name: hospital-e
+    environment:
+      <<: *node-env
+      NODE_CONFIG: /config/hospital-e.yaml
+    volumes:
+      - ./config/hospital-e.yaml:/config/hospital-e.yaml:ro
+      - ./data/slices/hospital-e.csv:/data/hospital-e.csv:ro
+      - ./.pki:/pki:ro
+      - checkpoints-e:/checkpoints
+    ports:
+      - "8005:8005"
 
   dashboard:
     build:
@@ -86,13 +173,22 @@ services:
       HEARTBEAT_STALE_S: "7"
       # must match shared_secret in config/hospital-*.yaml (or in the provisioned kits)
       MEDCHAIN_SHARED_SECRET: ${MEDCHAIN_SHARED_SECRET:-medchain-demo-secret}
+      # the relay reaches the nodes over HTTPS: trust the network CA
+      NODE_EXTRA_CA_CERTS: /pki/ca.crt
+    volumes:
+      - ./.pki:/pki:ro
     depends_on:
       postgres:
         condition: service_healthy
+      pki:
+        condition: service_completed_successfully
     ports:
       - "8080:8080"
 
 volumes:
+  directory-data:
   checkpoints-a:
   checkpoints-b:
   checkpoints-c:
+  checkpoints-d:
+  checkpoints-e:

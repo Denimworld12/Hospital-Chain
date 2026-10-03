@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download the UCI Heart Disease data and write three non-IID hospital slices.
+"""Download the UCI Heart Disease data and write five non-IID hospital slices.
 
 The UCI collection is itself four hospital datasets, so the non-IID split is the
 real one: each MedChain hospital gets one source institution's patients, with
@@ -8,8 +8,18 @@ that institution's own case mix, disease prevalence, and missing-value pattern.
     hospital-a  <- Cleveland Clinic Foundation           (303 patients)
     hospital-b  <- Hungarian Institute of Cardiology      (294 patients)
     hospital-c  <- V.A. Medical Center, Long Beach        (200 patients)
+    hospital-d  <- University Hospitals Zurich and Basel  (62 patients, half 1 of the Swiss file)
+    hospital-e  <- University Hospitals Zurich and Basel  (61 patients, half 2 of the Swiss file)
 
-Columns kept are the ten that all three sources record reasonably well; `slope`,
+The Swiss file merges the Zurich and Basel patients without saying which row came
+from which, so it is split in two by alternating rows (rows 1, 3, 5, ... and 2, 4,
+6, ...) to give the chain a fourth and fifth hospital; the two halves share one case
+mix and are documented as such. The Swiss sites never recorded cholesterol (every
+`chol` is 0), so it is filled with a fixed reference value (200 mg/dL, the
+guideline cutoff for desirable total cholesterol) rather than any statistic of
+another hospital's patients.
+
+Columns kept are the ten that the sources record reasonably well; `slope`,
 `ca` and `thal` are mostly missing outside Cleveland and are dropped. Remaining
 missing values (`?`, and physiologically impossible zeros in `chol`/`trestbps`)
 are imputed with the median *of that hospital's own slice*, so no statistic ever
@@ -38,7 +48,11 @@ SOURCES = {
     "hospital-a": ("processed.cleveland.data", "Cleveland Clinic Foundation"),
     "hospital-b": ("processed.hungarian.data", "Hungarian Institute of Cardiology, Budapest"),
     "hospital-c": ("processed.va.data", "V.A. Medical Center, Long Beach"),
+    "hospital-d": ("processed.switzerland.data", "University Hospitals Zurich and Basel (Swiss file, half 1 of 2)"),
+    "hospital-e": ("processed.switzerland.data", "University Hospitals Zurich and Basel (Swiss file, half 2 of 2)"),
 }
+HALVES = {"hospital-d": 0, "hospital-e": 1}  # alternating rows of the shared Swiss file
+NEVER_RECORDED = {"chol": 200.0}  # used only when a hospital recorded no value at all for the column
 RAW_COLUMNS = ["age", "sex", "cp", "trestbps", "chol", "fbs", "restecg", "thalach", "exang", "oldpeak", "slope", "ca", "thal", "num"]
 KEEP = ["age", "sex", "cp", "trestbps", "chol", "fbs", "restecg", "thalach", "exang", "oldpeak"]
 ZERO_IS_MISSING = {"chol", "trestbps"}
@@ -74,7 +88,7 @@ def clean(rows: list[dict]) -> list[dict]:
     medians = {}
     for col in KEEP:
         present = [x for x in (value(r, col) for r in rows) if x is not None]
-        medians[col] = statistics.median(present)
+        medians[col] = statistics.median(present) if present else NEVER_RECORDED[col]
 
     out = []
     for r in rows:
@@ -92,7 +106,10 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     manifest = {"source": "UCI Heart Disease (CC BY 4.0), https://doi.org/10.24432/C52P4X", "features": KEEP, "target": "target", "slices": {}}
     for node_id, (fname, institution) in SOURCES.items():
-        rows = clean(parse(fetch(fname)))
+        raw = parse(fetch(fname))
+        if node_id in HALVES:
+            raw = raw[HALVES[node_id]::2]
+        rows = clean(raw)
         path = OUT_DIR / f"{node_id}.csv"
         with path.open("w", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=KEEP + ["target"])

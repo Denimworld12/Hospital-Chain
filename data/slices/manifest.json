@@ -31,6 +31,18 @@
       "institution": "V.A. Medical Center, Long Beach",
       "patients": 200,
       "positive_rate": 0.745
+    },
+    "hospital-d": {
+      "file": "hospital-d.csv",
+      "institution": "University Hospitals Zurich and Basel (Swiss file, half 1 of 2)",
+      "patients": 62,
+      "positive_rate": 0.968
+    },
+    "hospital-e": {
+      "file": "hospital-e.csv",
+      "institution": "University Hospitals Zurich and Basel (Swiss file, half 2 of 2)",
+      "patients": 61,
+      "positive_rate": 0.902
     }
   }
 }

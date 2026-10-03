@@ -1,0 +1,16 @@
+# MedChain directory service (python -m directory). It decides chain membership -
+# where a new hospital goes, who bridges when one leaves - and nothing else: it never
+# sees model weights and never runs or influences training. Its store is its own
+# SQLite file, separate from the Postgres the dashboard reads.
+port: 8100
+db_path: /data/directory.sqlite
+# signs every membership document; nodes verify with directory/signing.pub
+signing_key: /pki/directory/signing.key
+# who may register (id + SHA-256 of its credential), in placement order; re-read on each request
+hospitals_file: /pki/directory/hospitals.yaml
+# a change takes effect this many rounds after the furthest member's current round
+margin_rounds: 3
+tls:
+  cert: /pki/directory/tls.crt
+  key: /pki/directory/tls.key
+  ca: /pki/ca.crt

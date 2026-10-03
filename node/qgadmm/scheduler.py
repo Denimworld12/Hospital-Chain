@@ -36,6 +36,16 @@ nodes gossip their recent per-edge residuals in a header. The first node that se
 every edge below epsilon for 3 consecutive rounds proposes a stop round a chain's
 length ahead; the proposal travels with the packets and every node stops after the
 same round.
+
+Membership changes (node/membership.py) land only at a round boundary, the same
+round on every node, so the head/tail schedule never breaks: positions are
+recomputed from the new chain (1, 3, 5, ... heads; 2, 4, ... tails), a removed
+link's lambda and mirror are dropped, and a new link starts at lambda = 0 and
+decodes nothing until both ends have fetched the other's full theta_hat with GET
+/snapshot - the same resync rule a rejoin uses. No quantized packet is sent on a
+link before that exchange. Consensus detection restarts with the new chain: only
+rounds of the current membership epoch count toward the streak, and a stop agreed
+under the old chain is dropped.
 """
 
 from __future__ import annotations
@@ -48,11 +58,11 @@ from typing import Callable, Mapping, Sequence
 
 import httpx
 
-from .. import wire
+from .. import security, wire
 from ..engine import NeighborUpdate, UpdatePackage
 from ..runner import ACTIVE, RoundMetrics, Runner
 from . import engine as qengine
-from .state import HEAD, TAIL, all_edges, clear_checkpoint, edge_key
+from .state import HEAD, TAIL, ChainPosition, all_edges, clear_checkpoint, edge_key
 
 log = logging.getLogger("medchain.qgadmm")
 
@@ -172,12 +182,58 @@ class ChainRoundScheduler(Runner):
     # than the gossip baseline does; a packet that is dropped anyway is recovered by a snapshot resync.
     INBOX_ROUNDS = 1024
 
-    def __init__(self, cfg, engine: "qengine.QGADMMEngine", db, client: httpx.AsyncClient, *, checkpoint_path):
-        super().__init__(cfg, engine, db, client)
+    def __init__(self, cfg, engine: "qengine.QGADMMEngine", db, client: httpx.AsyncClient, *, checkpoint_path, **kw):
         self.pos = engine.pos
+        self._needs_link: set[str] = set()  # new links whose full snapshot exchange has not happened yet
+        super().__init__(cfg, engine, db, client, **kw)
         self.checkpoint_path = checkpoint_path
-        self.edges = all_edges(self.pos.chain)
         self._reset_run_state()
+
+    # -- membership -------------------------------------------------------------
+    def _set_membership(self, doc) -> None:
+        super()._set_membership(doc)
+        if doc.has(self.cfg.node_id):
+            pos = ChainPosition(doc.chain, self.cfg.node_id)
+            added, _ = self.engine.relink(pos)
+            self.pos = pos
+            self._needs_link |= added
+            self._needs_link &= set(pos.neighbours)
+        self.edges = all_edges(doc.chain)
+
+    def _apply_membership(self, doc, r) -> None:
+        old = set(self.pos.neighbours)
+        changed = self.membership is None or not doc.same_chain(self.membership)
+        super()._apply_membership(doc, r)
+        if not self.in_chain or r is None:
+            return
+        new = set(self.pos.neighbours)
+        for m in old - new:
+            for d in (self._closed_upto, self._peer_round, self._peer_alive):
+                d.pop(m, None)
+        for m in new - old:
+            self._closed_upto[m] = r - 1
+            self._peer_round.setdefault(m, 0)
+            self._peer_alive[m] = True
+        if changed:  # consensus must be re-established on the new chain
+            self.stop_at = self.converged_round = None
+
+    async def _link_new_neighbours(self, run_id: str, r: int) -> None:
+        """Full theta_hat snapshot from each new neighbour before any quantized packet crosses the link."""
+        for m in sorted(self._needs_link):
+            if await self.resync_mirror(run_id, r, m, reason="new link: full snapshot exchange before any "
+                                        "quantized update (lambda starts at 0)", rejoin_round=r):
+                self._needs_link.discard(m)
+
+    async def _prepare_join(self, peers) -> None:
+        self._reset_run_state(start_round=self.start_round)
+        self._needs_link = set(self.pos.neighbours)
+        for s in peers.values():
+            if s.get("stop_at"):
+                self._propose_stop(int(s["stop_at"]))
+        # start from the new neighbour's published model rather than from zero
+        got = await self._fetch_snapshot(self.pos.left or self.pos.right)
+        if got is not None:
+            await asyncio.to_thread(self.engine.warm_start, got[0]["theta_hat"])
 
     def _reset_run_state(self, start_round: int = 1) -> None:
         self.start_round = start_round
@@ -204,7 +260,8 @@ class ChainRoundScheduler(Runner):
         if run_id == self.run_id and self.active and update.sender in self._peer_round:
             self._peer_round[update.sender] = max(self._peer_round[update.sender], update.round)
             self._peer_alive[update.sender] = True
-            self._absorb(meta or {})
+            if update.round >= (self.epoch_start_round or 1):  # a stop agreed under an older chain is void
+                self._absorb(meta or {})
         return await super().receive(run_id, update)
 
     def _absorb(self, meta: Mapping[str, str]) -> None:
@@ -230,9 +287,8 @@ class ChainRoundScheduler(Runner):
         """A restarted neighbour resumes at rejoin_round: it will never send packets for earlier rounds.
 
         (_peer_round[m] > r means "m is past round r"; _wait never waits for such a packet.)"""
-        if requester in self._peer_round:
-            self._peer_round[requester] = max(self._peer_round[requester], rejoin_round)
-            self._peer_alive[requester] = True
+        self._peer_round[requester] = max(self._peer_round.get(requester, 0), rejoin_round)
+        self._peer_alive[requester] = True
 
     # -- control ----------------------------------------------------------------
     async def start(self, run_id: str, rounds: int, initiated_by: str) -> str:
@@ -241,6 +297,7 @@ class ChainRoundScheduler(Runner):
             self.engine.reset(run_id)
             clear_checkpoint(self.checkpoint_path)
             self._reset_run_state()
+            self._needs_link = set()  # every node starts from zero: all mirrors already agree
         return outcome
 
     # -- the loop -------------------------------------------------------------
@@ -250,8 +307,12 @@ class ChainRoundScheduler(Runner):
             r = self.start_round
             while r <= self.total_rounds:
                 await self._resume.wait()
+                if not await self._boundary(r):
+                    self._left(run_id)
+                    return
                 self.current_round = r
-                self.db.round_started(run_id, self.cfg.node_id, r, len(self.cfg.neighbours))
+                await self._link_new_neighbours(run_id, r)
+                self.db.round_started(run_id, self.cfg.node_id, r, len(self.neighbours))
                 if self.pos.group == HEAD:
                     local, completed, heard, missing = await self._head_round(run_id, r)
                 else:
@@ -279,6 +340,7 @@ class ChainRoundScheduler(Runner):
                           detail={"error": str(exc), "engine": self.engine.label})
         finally:
             self._finished_runs = (self._finished_runs + [run_id])[-32:]
+            self._flush_pending()
             self.db.heartbeat(self.cfg.node_id, run_id, self.state, self.current_round)
 
     async def _head_round(self, run_id: str, r: int):
@@ -311,7 +373,9 @@ class ChainRoundScheduler(Runner):
                  wire.H_VIEW: self._view_header()}
         if self.stop_at is not None:
             extra[wire.H_STOP] = str(self.stop_at)
-        sent = await asyncio.gather(*(self._post_update(n, pkg, run_id, r, extra) for n in self.cfg.neighbours))
+        # no quantized packet on a link whose full snapshot exchange has not happened yet
+        sent = await asyncio.gather(*(self._post_update(n, pkg, run_id, r, extra) for n in self.neighbours
+                                      if n.id not in self._needs_link))
         for n, participating, _ in sent:
             self._peer_alive[n.id] = participating
         return {n.id for n, _, on_time in sent if on_time}, {n.id for n, participating, _ in sent if participating}
@@ -360,11 +424,13 @@ class ChainRoundScheduler(Runner):
         return counted
 
     def _take(self, run_id: str, upto: int) -> list[NeighborUpdate]:
+        """Buffered packets of this run up to round `upto`, from current neighbours only (a removed link's are dropped)."""
         out = []
+        current = set(self.pos.neighbours)
         for key in sorted(k for k in self._inbox if k[0] != run_id or k[1] <= upto):
             ups = self._inbox.pop(key)
             if key[0] == run_id:
-                out.extend(ups.values())
+                out.extend(u for u in ups.values() if u.sender in current)
         return out
 
     async def _apply(self, run_id: str, r: int, updates: list[NeighborUpdate]) -> set[str]:
@@ -374,6 +440,7 @@ class ChainRoundScheduler(Runner):
         for m in res.resync:
             if await self.resync_mirror(run_id, r, m, reason="packet base does not match my mirror"):
                 ok.add(m)
+                self._needs_link.discard(m)
             else:
                 ok.discard(m)
         return ok
@@ -396,17 +463,18 @@ class ChainRoundScheduler(Runner):
             self._propose_stop(r + len(self.pos.chain) + 1)
             self.db.audit(node_id=self.cfg.node_id, event="consensus_detected", run_id=run_id, round_num=r,
                           detail={"converged_round": self.converged_round, "stop_at": self.stop_at,
-                                  "epsilon": self.cfg.epsilon, "engine": self.engine.label})
+                                  "epsilon": self.cfg.epsilon, "engine": self.engine.label, "epoch": self.epoch,
+                                  "chain": list(self.pos.chain)})
         max_res = max(residuals.values()) if residuals else None
-        m = RoundMetrics(r, ev.loss, ev.accuracy, local.train_loss, heard, len(self.cfg.neighbours),
+        m = RoundMetrics(r, ev.loss, ev.accuracy, local.train_loss, heard, len(self.neighbours),
                          max_residual=max_res, degraded=degraded)
         self.history.append(m)
         self.db.record_metrics(run_id=run_id, node_id=self.cfg.node_id, round_num=r, loss=ev.loss,
                                accuracy=ev.accuracy, train_loss=local.train_loss, n_train=local.n_train,
-                               n_test=ev.n_test,
+                               n_test=ev.n_test, epoch=self.epoch, chain_size=len(self.pos.chain),
                                residuals={"edges": residuals, "exchanged": sorted(completed), "stale_edges": stale,
                                           "degraded": degraded, "epsilon": self.cfg.epsilon,
-                                          "group": self.pos.group, "bits": self.engine.bits})
+                                          "group": self.pos.group, "bits": self.engine.bits, "epoch": self.epoch})
         self.db.round_finished(run_id, self.cfg.node_id, r, heard)
         self.db.heartbeat(self.cfg.node_id, run_id, self.state, r)
         if self.cfg.checkpoint_every and r % self.cfg.checkpoint_every == 0:
@@ -417,7 +485,8 @@ class ChainRoundScheduler(Runner):
                  f" DEGRADED missing={missing}" if degraded else "")
 
     def _detect_consensus(self) -> bool:
-        full = [k for k in sorted(self.view) if all(e in self.view[k] for e in self.edges)]
+        since = self.epoch_start_round or 1  # only rounds run on the current chain count
+        full = [k for k in sorted(self.view) if k >= since and all(e in self.view[k] for e in self.edges)]
         if len(full) < CONVERGED_STREAK:
             return False
         last = full[-CONVERGED_STREAK:]
@@ -430,7 +499,9 @@ class ChainRoundScheduler(Runner):
 
     # -- resync and rejoin (GET /snapshot) --------------------------------------
     async def _fetch_snapshot(self, m: str, rejoin_round: int | None = None) -> tuple[dict, int] | None:
-        n = self.cfg.neighbour(m)
+        n = self.peer(m)
+        if n is None:
+            return None
         params = {"requester": self.cfg.node_id}
         if rejoin_round is not None:
             params["rejoin_round"] = str(rejoin_round)
@@ -444,12 +515,21 @@ class ChainRoundScheduler(Runner):
             log.warning("snapshot from %s refused: %s", m, resp.status_code)
             return None
         body = resp.content
+        if self.signing_key is not None:  # the snapshot replaces my mirror wholesale: it must really be m's
+            try:
+                security.verify(security.parse_public_key(n.public_key or ""), resp.headers.get(wire.H_SIGNATURE), body,
+                                {k: v for k, v in resp.headers.items() if k.lower().startswith("x-medchain-")}, "snapshot")
+            except (security.SignatureError, ValueError) as exc:
+                log.error("snapshot from %s rejected: %s", m, exc)
+                self.db.audit(node_id=self.cfg.node_id, event="snapshot_rejected", run_id=self.run_id, sender=m,
+                              receiver=self.cfg.node_id, detail={"reason": str(exc)})
+                return None
         snap = qengine.parse_snapshot(body, self.engine.d, int(resp.headers[wire.H_SEQ]),
                                       int(resp.headers[wire.H_MIRROR_SEQ]))
         return snap, len(body)
 
-    async def resync_mirror(self, run_id: str, r: int, m: str, *, reason: str) -> bool:
-        got = await self._fetch_snapshot(m)
+    async def resync_mirror(self, run_id: str, r: int, m: str, *, reason: str, rejoin_round: int | None = None) -> bool:
+        got = await self._fetch_snapshot(m, rejoin_round)
         if got is None:
             return False
         snap, size = got
@@ -478,9 +558,10 @@ class ChainRoundScheduler(Runner):
             return "no-checkpoint"
         st = self.engine.state
         run_id, ckpt_round = st.run_id, st.round_no
+        added, _ = self.engine.relink(self.pos)  # the chain may have changed while I was down
         peers: dict[str, dict] = {}
         for _ in range(attempts):
-            for n in self.cfg.neighbours:
+            for n in self.neighbours:
                 try:
                     s = (await self.client.get(f"{n.url}/status")).json()
                 except (httpx.HTTPError, ValueError):
@@ -503,6 +584,8 @@ class ChainRoundScheduler(Runner):
         self.run_id, self.total_rounds, self.current_round = run_id, total, rejoin_round - 1
         self.history = []
         self._reset_run_state(start_round=rejoin_round)
+        self.epoch_start_round = rejoin_round
+        self._needs_link = set(added)
         for s in peers.values():
             if s.get("stop_at"):
                 self._propose_stop(int(s["stop_at"]))
