@@ -20,10 +20,13 @@ jobs:
             node/requirements.txt
       - run: pip install -r requirements-dev.txt
       # quantizer unbiasedness, round-trip determinism, boundary nodes, convergence sanity,
-      # the networked chain over real HTTP (incl. kill + rejoin), and gossip parity
+      # the networked chain over real HTTP (incl. kill + rejoin) at N = 3, 4 and 5, joins and
+      # planned leaves through the directory over TLS with signed updates, and gossip parity
       - run: pytest tests/unit -v
       - name: experiments/compare_engines.py (headless, all three engines)
         run: python experiments/compare_engines.py --out /tmp/compare-out --no-sweep
+      - name: experiments/compare_engines.py on a five-hospital chain
+        run: python experiments/compare_engines.py --out /tmp/compare-out-5 --no-sweep --chain hospital-a,hospital-b,hospital-c,hospital-d,hospital-e
 
   dashboard-build:
     name: dashboard build
@@ -39,10 +42,12 @@ jobs:
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
       - run: npm ci
+      # snapshot maths across membership changes (topology, consensus, network loss, communication)
+      - run: npm test
       - run: npm run build
 
   docker-stack:
-    name: docker build + pytest (live stack, kill tests) - engine ${{ matrix.engine }}
+    name: docker build + pytest (live stack, kill, join and leave tests) - engine ${{ matrix.engine }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

@@ -274,3 +274,17 @@ def test_membership_documents_must_carry_the_directory_signature(net):
     r = httpx.post(f"{a.url}/membership", json=doc.to_dict(), verify=a.verify, timeout=5)
     assert r.status_code == 200 and r.json()["status"] == "stale"
     assert Membership.from_dict(doc.to_dict()) == doc
+
+
+def test_the_gossip_baseline_also_takes_its_chain_from_the_directory(tmp_path):
+    net = Network(tmp_path, HOSPITALS[:3], engine="gossip", round_pause_s=0.05)
+    try:
+        net.up(*HOSPITALS[:3])
+        net.start("hospital-b", rounds=15)
+        wait_until(lambda: net.completed(HOSPITALS[:3]), 60, "gossip run completes", 0.3)
+        for n in HOSPITALS[:3]:
+            hist = net.nodes[n].metrics()["history"]
+            assert len(hist) == 15 and all(h["neighbours_heard"] == h["neighbours_expected"] > 0 for h in hist)
+            assert {s["status"] for s in net.nodes[n].db.sent} == {"delivered"}  # signed, over TLS, accepted
+    finally:
+        net.stop()

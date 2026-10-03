@@ -227,8 +227,8 @@ def test_risk_assessment_on_every_node_and_via_the_dashboard():
     secret = next(iter(NODES.values())).shared_secret
     for node_id in NODES:
         assert get(f"{node_url(node_id)}/status").json()["assess"] == {"tabular": True, "ecg": True}
-        assert httpx.post(f"{node_url(node_id)}/assess", json=PATIENT, timeout=15).status_code == 401
-        r = httpx.post(f"{node_url(node_id)}/assess", json=PATIENT, headers={"X-MedChain-Secret": secret}, timeout=15)
+        assert httpx.post(f"{node_url(node_id)}/assess", json=PATIENT, timeout=15, verify=CA).status_code == 401
+        r = httpx.post(f"{node_url(node_id)}/assess", json=PATIENT, headers={"X-MedChain-Secret": secret}, timeout=15, verify=CA)
         assert r.status_code == 200 and r.json()["node_id"] == node_id
         assert r.json()["risk_tier"] in ("LOW", "MODERATE", "HIGH")
     last = sorted(NODES)[-1]
@@ -475,9 +475,10 @@ def test_a_hospital_joins_mid_run_then_a_middle_hospital_leaves_and_the_dashboar
         join_round, detail = joined[0]
         five = start_chain + [JOINER]
         assert detail["chain"] == five and detail["start_round"] == join_round
-        for n in start_chain:
-            changed = db_rows("SELECT round FROM audit_logs WHERE run_id = %s AND node_id = %s AND "
-                              "event = 'membership_changed'", (run_id, n))
+        for n in start_chain:  # every member switched on that same boundary (written when it reaches it)
+            changed = wait_until(lambda: db_rows("SELECT round FROM audit_logs WHERE run_id = %s AND node_id = %s "
+                                                 "AND event = 'membership_changed'", (run_id, n)), 60,
+                                 what=f"{n} reaches the boundary")
             assert [r for (r,) in changed] == [join_round], f"{n} switched on a different round"
 
         def after_join():

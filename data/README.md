@@ -11,6 +11,16 @@ regenerate them.
 | `hospital-a.csv` | Cleveland Clinic Foundation | 303 |
 | `hospital-b.csv` | Hungarian Institute of Cardiology | 294 |
 | `hospital-c.csv` | V.A. Medical Center, Long Beach | 200 |
+| `hospital-d.csv` | University Hospitals Zurich and Basel (Swiss file, rows 1, 3, 5, ...) | 62 |
+| `hospital-e.csv` | University Hospitals Zurich and Basel (Swiss file, rows 2, 4, 6, ...) | 61 |
+
+The UCI Swiss file merges the Zurich and Basel patients without saying which row
+came from which, so hospitals D and E (the chain's fourth and fifth hospitals)
+are its two alternating halves: they share one case mix (over 90% positive) and
+are not two genuinely different institutions. The Swiss sites never recorded
+cholesterol, so `chol` is filled with a fixed reference value (200 mg/dL, the
+guideline cutoff for desirable total cholesterol), not with a statistic of any
+other hospital's patients.
 
 The split is non-IID by construction: each hospital holds a different real
 institution's patients. In `docker-compose.yml` each node container mounts

@@ -297,6 +297,7 @@ class ChainRoundScheduler(Runner):
             self.engine.reset(run_id)
             clear_checkpoint(self.checkpoint_path)
             self._reset_run_state()
+            self._needs_link = set()  # every node starts from zero: all mirrors already agree
         return outcome
 
     # -- the loop -------------------------------------------------------------

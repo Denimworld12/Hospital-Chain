@@ -1,10 +1,15 @@
 # MedChain
 
 MedChain is a simulation of decentralized collaborative learning for hospitals.
-Three hospital nodes train one heart-disease model together on real UCI data.
-Each hospital trains only on its own patients, and only model updates travel
-between neighbouring nodes on a chain A - B - C. Patient rows never leave the
-node that holds them.
+A chain of hospital nodes trains one heart-disease model together on real UCI
+data. The chain can be any length, odd or even: the demo stack starts four
+hospitals (A - B - C - D), a fifth can join while a run is going, and a hospital
+can leave on purpose with its two neighbours bridging the gap. Each hospital
+trains only on its own patients, and only model updates travel, between chain
+neighbours, over TLS, each one signed by its sender. Patient rows never leave the
+node that holds them. No server ever sees or coordinates training; a small
+directory service decides chain membership (who joins where, who bridges when
+someone leaves) and nothing else. See [Joining and leaving](#joining-and-leaving).
 
 The training engine is **Q-GADMM** (Elgabli et al., "Q-GADMM: Quantized Group
 ADMM for Communication-Efficient Decentralized Machine Learning," IEEE Trans.
@@ -24,20 +29,61 @@ models are trained on public, **non-Indian** datasets (see
 ## What it looks like
 
 These screenshots come from a real stack running this repository's code. Each
-one was taken while a real training round ran through the dashboard. They were
-captured on the earlier gossip-baseline MVP dashboard, so they predate the
-consensus panel, the network-loss panel, the engine chip and the 32-bit
-comparison described below.
+one was taken while a real training round ran through the dashboard. Most were
+captured on the earlier three-hospital gossip-baseline MVP dashboard, so they
+predate the consensus panel, the network-loss panel, the engine chip, the
+32-bit comparison and dynamic membership described below.
+
+### A hospital joins, another leaves (live)
+
+These four are from the current dashboard, on this repository's compose stack
+(TLS, signed updates, the directory), during two Q-GADMM b=2 runs:
+
+1. Four hospitals were training (A - B - C - D) when `hospital-e` was started. The
+   directory appended it from round 24 (membership epoch 11): every member
+   switched on that round, and D and E each fetched the other's full snapshot
+   (384 bytes each way) before any quantized packet crossed the new link. The
+   five-hospital chain reached consensus at round 182.
+
+![Topology after hospital-e joined: five hospitals in chain order, alternating head and tail](docs/screenshots/dynamic-join-topology.png)
+
+2. On the next run, `hospital-b` announced a planned departure at round 21
+   (`python -m node.leave`). From round 24 (epoch 12) A and C bridged with a new
+   link (again one full snapshot each way), C and D flipped from head/tail to
+   tail/head, and B stopped after round 23. The chain A - C - D - E reached
+   consensus at round 200, with the network training loss settling at 0.447
+   (the centralized optimum for those four hospitals' data is 0.4475). Neither
+   run had a single degraded round.
+
+![Topology after hospital-b left: A - C - D - E, roles flipped after the gap, B listed as left the chain](docs/screenshots/dynamic-leave-topology.png)
+
+The consensus panel shows only the current links (A - C, C - D, D - E), says
+when the chain changed and that the consensus check restarted, and the network
+loss now averages over the four hospitals in the chain:
+
+![Training monitor after the leave: three pair lines falling below epsilon, consensus reached, network loss over 4 hospitals](docs/screenshots/dynamic-training-monitor.png)
+
+Bytes per round step down from 8 packets to 6 at round 24, when the chain went
+from five hospitals (four links) to four (three links):
+
+![Communication page after the leave: 4 hospitals, 3 links, bytes per round drop at round 24](docs/screenshots/dynamic-communication.png)
+
+The same sequence (four hospitals, a join, a middle hospital leaving, consensus,
+and each dashboard page following it) is an automated test against the live
+stack (`tests/integration/test_stack.py`).
 
 ### Topology
 
 ![Network topology: three hospital nodes in a chain, all alive (gossip-baseline MVP dashboard)](docs/screenshots/topology.png)
 
-This shows the three hospitals in a chain (A - B - C). Each node has a status
-dot: green means the node sent a heartbeat recently, and orange means it is
-down. Under each hospital is its patient count and the last round it finished.
-The current dashboard also animates an envelope along an edge on each
-`/update`. (Screenshot from the gossip-baseline MVP.)
+This shows the hospitals in chain order. Each node has a status dot: green means
+the node sent a heartbeat recently, and orange means it is down. Under each
+hospital is its patient count and the last round it finished. The current
+dashboard draws whatever chain the nodes report (any number of hospitals, in
+chain order, each labelled with its position and head/tail group), lists
+hospitals that left the chain separately, shows the membership epoch, and
+animates an envelope along an edge on each `/update`. (Screenshot from the
+three-hospital gossip-baseline MVP.)
 
 ### Training monitor
 
@@ -89,11 +135,11 @@ myocardial infarction or abnormal heartbeat.
 - **Docker** with the **Docker Compose v2** plugin (`docker compose ...`).
   Everything else runs inside containers: Python 3.12 with CPU-only PyTorch for
   the nodes, Node 22 for the dashboard build, and Postgres 16.
-- **Free host ports:** `5432`, `8001`, `8002`, `8003` and `8080`.
-- **Free container names:** `hospital-a`, `hospital-b`, `hospital-c`,
-  `dashboard` and `medchain-postgres`. The compose file sets fixed
-  `container_name`s, so only one copy of the stack can run on a machine at a
-  time.
+- **Free host ports:** `5432`, `8001` to `8005`, `8080` and `8100`.
+- **Free container names:** `hospital-a` to `hospital-e`, `directory`,
+  `dashboard`, `medchain-pki` and `medchain-postgres`. The compose file sets
+  fixed `container_name`s, so only one copy of the stack can run on a machine at
+  a time.
 - **Internet access on the first build**, to pull the base images and install
   the pip and npm packages (the node image installs CPU-only PyTorch from the
   PyTorch wheel index). The data slices ship in `data/slices/`, so the dataset
@@ -106,8 +152,9 @@ myocardial infarction or abnormal heartbeat.
 
 ## Running it
 
-The system has two parts: the **backend** (three hospital nodes plus Postgres)
-and the **dashboard** (an observer UI). One compose file starts both.
+The system has two parts: the **backend** (four hospital nodes, the membership
+directory and Postgres) and the **dashboard** (an observer UI). One compose file
+starts both.
 
 ### 1. Start the backend
 
@@ -122,19 +169,24 @@ docker compose ps
 
 | Service | Host port | What it is |
 | --- | --- | --- |
-| `hospital-a` / `hospital-b` / `hospital-c` | 8001 / 8002 / 8003 | FastAPI node: `GET /health`, `GET /status`, `POST /round/start`, `POST /update`, `GET /snapshot`, `GET /metrics` (+ `POST /round/pause`, `/round/resume`, and the `POST /assess*` risk-assessment endpoints). All three run the same image, and the mounted `config/hospital-*.yaml` decides which hospital it is and which engine it runs. Each node mounts only its own data slice. |
+| `pki` (container `medchain-pki`) | - | Runs once on start: `scripts/pki.py` issues the demo network CA, each node's and the directory's TLS certificate, each node's Ed25519 update-signing key and each hospital's directory credential into `./.pki/` (gitignored). Later starts keep what exists. |
+| `directory` | 8100 | The membership directory (`directory/`): decides where a hospital sits in the chain and tells hospitals who to connect to when one joins or leaves. Its own SQLite store, not Postgres. See [The directory](#the-directory). |
+| `hospital-a` ... `hospital-d` | 8001 ... 8004 | FastAPI node over HTTPS: `GET /health`, `GET /status`, `POST /round/start`, `POST /update`, `GET /snapshot`, `GET /metrics`, `GET`/`POST /membership`, `POST /membership/leave` (+ `POST /round/pause`, `/round/resume`, and the `POST /assess*` risk-assessment endpoints). All run the same image, and the mounted `config/hospital-*.yaml` decides which hospital it is and which engine it runs. Each node mounts only its own data slice. `hospital-e` (8005) is defined too but only starts on request (profile `join`). |
 | `postgres` (container `medchain-postgres`) | 5432 | Holds `nodes`, `runs`, `rounds`, `updates_meta`, `metrics` and `audit_logs`. |
 | `dashboard` | 8080 | Observer UI. It reads Postgres and pushes snapshots and update events over `/ws`. |
 
-`GET /snapshot` exists only for mirror resync after a restart: it returns a
-node's quantized model snapshot, never data.
+On start each node registers with the directory, which places the four
+hospitals in its configured order, A - B - C - D: positions 1 and 3 are the HEAD
+group, 2 and 4 the TAIL group. `GET /snapshot` exists only for a full resync
+(after a restart, a mirror mismatch or a new link): it returns a node's quantized
+model snapshot, never data.
 
-Check that a node is up. `/health`, `/status` and `/metrics` need no
-authentication:
+Every node serves HTTPS with a certificate from the stack's own CA, so point
+`curl` at it. `/health`, `/status` and `/metrics` need no authentication:
 
 ```sh
-curl http://localhost:8001/health
-curl http://localhost:8001/status
+curl --cacert .pki/ca.crt https://localhost:8001/health
+curl --cacert .pki/ca.crt https://localhost:8001/status     # chain, position, group, neighbours, epoch
 ```
 
 To start a training run directly against a node's API, send the shared
@@ -142,23 +194,24 @@ secret in the header. The demo secret is `shared_secret` in
 `config/hospital-*.yaml`:
 
 ```sh
-curl -X POST http://localhost:8001/round/start \
+curl --cacert .pki/ca.crt -X POST https://localhost:8001/round/start \
   -H 'Content-Type: application/json' \
   -H 'X-MedChain-Secret: medchain-demo-secret' \
-  -d '{"rounds": 200}'
+  -d '{"rounds": 400}'
 ```
 
-The node that gets the request floods it to its neighbours, so all three
-hospitals start the same run. `rounds` is optional and defaults to the
-configured round limit (`training.rounds`, 200). Q-GADMM stops earlier, on the
+The node that gets the request floods it to its neighbours, so every hospital
+in the chain starts the same run. `rounds` is optional and defaults to the
+configured round limit (`training.rounds`, 400). Q-GADMM stops earlier, on the
 same round everywhere, once every edge's residual has stayed below epsilon for
-3 rounds (about round 160 at b=2). A request without the header gets `401`.
-The same header works for `POST /round/pause` and `POST /round/resume`.
+3 rounds (about round 100 for this four-hospital chain at b=2; a longer chain
+takes longer, which is expected). A request without the header gets `401`. The
+same header works for `POST /round/pause` and `POST /round/resume`.
 
 Once the run finishes, you can read any node's per-round history:
 
 ```sh
-curl http://localhost:8002/metrics
+curl --cacert .pki/ca.crt https://localhost:8002/metrics
 ```
 
 ### 2. Open the dashboard
@@ -166,7 +219,7 @@ curl http://localhost:8002/metrics
 Open <http://localhost:8080> in a browser.
 
 - Press **START TRAINING ROUND** in the top bar. The button changes to show
-  `TRAINING: ROUND n OF 200`, and a **PAUSE** button becomes active.
+  `TRAINING: ROUND n OF 400`, and a **PAUSE** button becomes active.
 - Use the top navigation (**TOPOLOGY**, **TRAINING MONITOR**,
   **COMMUNICATION**, **AUDIT LOG**) to watch the run live. With
   `engine: qgadmm`, watch the consensus panel ("disagreement between
@@ -176,10 +229,10 @@ Open <http://localhost:8080> in a browser.
 - **RISK ASSESSMENT** is the separate per-patient tool described in step 3.
 
 The per-hospital cards show each hospital's loss on its own held-out patients.
-Hospitals A and B improve; hospital C (VA Long Beach, the most different slice)
-ends slightly *worse* on its own held-out split than after its first local round,
+Some hospitals improve; a hospital whose patients differ most from the rest can
+end slightly *worse* on its own held-out split than after its first local round,
 because agreeing on one shared model costs it a little local fit. The network
-training loss (all hospitals' training rows, weighted by patients) is the
+training loss (all chain members' training rows, weighted by patients) is the
 objective the chain minimises, and it falls to the centralized optimum.
 
 The dashboard only observes. Its buttons send a single request to one live
@@ -193,7 +246,7 @@ readings and press **ASSESS RISK**. You can also call a node directly. The
 `/assess` endpoints need the same `X-MedChain-Secret` header as `/round/*`:
 
 ```sh
-curl -X POST http://localhost:8001/assess \
+curl --cacert .pki/ca.crt -X POST https://localhost:8001/assess \
   -H 'Content-Type: application/json' \
   -H 'X-MedChain-Secret: medchain-demo-secret' \
   -d '{"age": 58, "gender": "male", "height": 172, "weight": 88, "ap_hi": 150, "ap_lo": 95,
@@ -214,7 +267,7 @@ held-out metrics. `cholesterol` and `gluc` are 1 (normal), 2 (above normal) or
 | `POST /assess/ecg/pdf` | multipart field `ecg` | PDF report |
 
 ```sh
-curl -X POST http://localhost:8001/assess/ecg \
+curl --cacert .pki/ca.crt -X POST https://localhost:8001/assess/ecg \
   -H 'X-MedChain-Secret: medchain-demo-secret' -F ecg=@my-ecg.jpg
 ```
 
@@ -242,25 +295,30 @@ Neither dataset is Indian-sourced. Provenance and licenses are in
 
 ### Kill-and-rejoin demo (optional)
 
-Start a run, then kill the middle hospital (the TAIL node) while it trains:
+This is the *unplanned* case: a hospital that dies without notice. (A planned
+departure is different; see [Joining and leaving](#joining-and-leaving).) Start a
+run, then kill hospital B (position 2, a TAIL node) while it trains:
 
 ```sh
-curl -X POST http://localhost:8001/round/start \
+curl --cacert .pki/ca.crt -X POST https://localhost:8001/round/start \
   -H 'Content-Type: application/json' \
   -H 'X-MedChain-Secret: medchain-demo-secret' \
-  -d '{"rounds": 200}'
+  -d '{"rounds": 400}'
 sleep 4
 docker kill hospital-b
 ```
 
 Within about 10 seconds, Hospital B's status dot turns orange and the
-**TOPOLOGY** page reads `2 OF 3 NODES ALIVE`:
+**TOPOLOGY** page reads `3 OF 4 IN THE CHAIN ALIVE`. B stays in the chain: a
+crash is not a departure, so nothing is rewired. (These screenshots are from the
+three-hospital MVP.)
 
 ![Topology after docker kill hospital-b: B is down, A and C are alive (gossip-baseline MVP dashboard)](docs/screenshots/kill-topology.png)
 
-Hospitals A and C (the heads) keep training. B is their only neighbour, so
-their rounds are marked degraded and logged, and each keeps training on its own
-data. B's curve stops at the round where it died:
+Hospitals A and C (B's neighbours, both heads) keep training. Their rounds are
+marked degraded and logged: A, whose only neighbour is B, trains on its own data,
+and C keeps exchanging with D. The chain is split around the gap until B comes
+back. B's curve stops at the round where it died:
 
 ![Training monitor after the kill: A and C reach later rounds, B stops and shows DOWN (gossip-baseline MVP dashboard)](docs/screenshots/kill-training-monitor.png)
 
@@ -289,82 +347,230 @@ and it joins the next run you start.
 docker compose down        # add -v to also delete the Postgres data and checkpoints
 ```
 
+## Joining and leaving
+
+The chain is not fixed. Hospitals join and leave while the system keeps
+running, and the model state is handled, not just the connections.
+
+**Chain of N, not a ring.** Any number of hospitals, odd or even: positions
+1, 3, 5, ... are the HEAD group and 2, 4, ... the TAIL group, so every link joins
+a head to a tail and Q-GADMM's two-phase schedule (heads, then tails) holds at
+every length. A ring is deliberately not used: it only splits into two
+alternating groups when the hospital count is even.
+
+**Only at a round boundary.** Every membership change is a numbered *epoch* with
+the round it takes effect at; every member switches on that same round, never
+mid-round. A new link starts at `lambda = 0`; a removed link's `lambda` (and
+mirror) is discarded; links that survive keep theirs. Because a quantized update
+is decoded relative to the shared `theta_hat`, a new neighbour cannot decode
+anything until it has the other side's full snapshot, so both ends of a new link
+first exchange one full-precision snapshot (`GET /snapshot`, the same resync
+rule a rejoin uses, audited as `snapshot_resync` with its byte cost), and no
+quantized packet crosses the link before that. Consensus detection restarts on
+the new chain: a stop agreed on the old chain is dropped, and the dashboard's
+**CONSENSUS REACHED** pill resets.
+
+**Join (append-only).** A new hospital registers with the directory. While a run
+is going, the directory appends it at the end of the chain, from a round
+boundary a few rounds ahead of the furthest member (`margin_rounds`), and tells
+every member. Appending is the only placement mid-run: inserting a hospital in
+the middle would flip the head/tail role of every hospital after it. The new
+node learns the run from its neighbour, starts from that neighbour's published
+model, and trains with the others from that round. In the demo stack:
+
+```sh
+docker compose --profile join up -d hospital-e      # A - B - C - D  ->  A - B - C - D - E
+```
+
+**Planned leave (chain repair).** A leaving hospital asks the directory to take
+it out at the next boundary and tells its two neighbours directly; they bridge
+to each other with a new link (`lambda = 0`, snapshot exchange, as for a join),
+and the chain heals instead of splitting into two dead ends. Hospitals after the
+gap move up one position, so their head/tail roles flip, all on the same round.
+
+```sh
+docker compose exec hospital-b python -m node.leave  # A - B - C - D - E  ->  A - C - D - E
+```
+
+**A crash is not a departure.** A hospital that dies without notice stays in
+the chain: its neighbours skip it and reuse its last mirror until it comes back
+and rejoins from its checkpoint (the kill-and-rejoin demo above). Only a planned
+leave rewires the chain.
+
+Where a hospital is placed affects how fast the chain agrees: a longer chain
+needs more rounds (in the committed experiments, consensus takes about 69
+rounds for three hospitals and about 160 for five at b=2). That is expected, not
+a bug. The ADMM penalty is `rho: 5`, which reaches consensus at b=2 on every
+chain length tried (3, 4 and 5 hospitals); the old `rho: 24` stalls just above
+epsilon on four or more.
+
+### The directory
+
+`directory/` is a small FastAPI service with three calls: `POST /register`,
+`POST /leave` and `GET /membership`. Be clear about what it is: it **does
+coordinate membership**. It decides where a new hospital goes in the chain and
+tells the existing hospitals who to connect to, so it is more than a phone
+book. It is a **single point of failure for joins and leaves, not for
+training**: nothing in a node's round loop calls it, so if it goes down, the
+hospitals already in the chain keep training uninterrupted (tested), and only
+joining and leaving wait for it to come back.
+
+- It never sees model weights and never runs or influences training. Members'
+  public `GET /status` (run id, round, agreed stop) is all it reads, to pick the
+  round boundary for a change.
+- Its storage is its own SQLite file (the `directory-data` volume): every
+  membership document it issued, and a log of registrations, joins, leaves and
+  failed authentications. It is separate from the Postgres the dashboard reads,
+  so "the dashboard is not a coordinator" stays true: the dashboard draws the
+  chain from what each node reports about itself (`nodes.epoch`, `chain`,
+  `in_chain`) and never talks to the directory.
+- Registration needs the hospital's own pre-shared credential
+  (`Authorization: Bearer ...`); the directory stores only its SHA-256 hash, in
+  `hospitals.yaml`, which also gives the placement order between runs. A wrong
+  credential, or one hospital's credential used to register as another, is
+  refused, so nothing else on the network can join the chain.
+- Every membership document is signed with the directory's Ed25519 key. Nodes
+  verify the signature whoever delivers it (the directory, the leaving hospital,
+  or a neighbour that has a newer epoch), so changes can travel peer to peer and
+  nobody can forge one.
+
+### Security between nodes
+
+A checksum only catches accidental corruption: someone who controls the wire can
+change the bytes and recompute it. That was acceptable inside one Docker network;
+it is not once hospitals run on separate machines. So:
+
+- **TLS on every link.** Nodes and the directory serve HTTPS with certificates
+  from the network CA and verify each other's certificates, hostname included.
+  Plain HTTP is not served at all.
+- **Signed updates.** Every `/update` carries an Ed25519 signature over the
+  body's SHA-256 and every `X-MedChain-*` header that steers training (run,
+  round, sender, receiver, sequence, snapshot fingerprints, residual view, stop
+  proposal, epoch). The receiver checks it with the sender's public key, which
+  it learned from the directory's signed membership document. A tampered packet
+  (even with a recomputed checksum), an injected header, a packet signed by
+  another key, one replayed to another node, or one from a sender with no key on
+  record is rejected and audited as `update_rejected` (tested). `GET /snapshot`
+  responses are signed the same way, since a snapshot replaces a mirror
+  wholesale.
+- The shared secret (`X-MedChain-Secret`) still guards `/round/*`,
+  `/snapshot`, `/membership/leave` and `/assess*`.
+
+The demo issues everything itself (`scripts/pki.py`: a self-signed CA,
+certificates, signing keys, credentials). **For a real deployment**, issue the
+node and directory TLS certificates from the hospitals' own PKI (or an
+enterprise CA they trust) and keep any CA key offline; generate each signing key
+on the hospital's own machine and register only its public half; deliver each
+directory credential out of band and rotate it like a password; restrict the
+node and directory ports to the hospitals' private network (a mesh such as
+Tailscale is still worth it for NAT traversal); and consider mutual TLS so that
+connections are refused before a signature is even checked.
+
 ## Running on separate machines
 
-The compose file above runs all three hospitals on one machine. The protocol does
-not depend on that. A node needs exactly one thing from the network: an HTTP URL
-for each of its chain neighbours, plus the URL its neighbours use to reach it.
-Those URLs are configuration, not code, so the same image runs one hospital per
-laptop with no code change.
+The compose file above runs every hospital on one machine. The protocol does not
+depend on that. A node needs an HTTPS address its neighbours and the directory
+can reach it at, and the directory's address; its neighbours' addresses arrive
+from the directory. Those addresses are configuration, not code, so the same
+image runs one hospital per laptop with no code change.
 
 **Use a private mesh network.** We recommend [Tailscale](https://tailscale.com) on
 every hospital machine (any WireGuard-style overlay works). It connects machines
-behind home and hospital NAT without port forwarding, it encrypts every packet
-between them, and it gives each machine a stable name such as
-`hospital-b.tail1234.ts.net`. MedChain adds no TLS of its own. Its authentication
-is the shared-secret header (`X-MedChain-Secret`), and it relies on the network
-layer for encryption, much as NVIDIA FLARE relies on TLS at the transport layer.
-Do not expose node ports to the public internet. A kit's `--bind-ip` publishes the
-port on one address only, for example the machine's Tailscale IP.
+behind home and hospital NAT without port forwarding and gives each machine a
+stable name such as `hospital-b.tail1234.ts.net`. MedChain encrypts and
+authenticates its own traffic (TLS plus signed updates), so the mesh is for
+reachability, not for security. Do not expose node ports to the public internet.
+A kit's `--bind-ip` publishes the port on one address only, for example the
+machine's Tailscale IP.
 
 ### Provision one kit per hospital
 
 `scripts/provision.py` follows NVIDIA FLARE's "startup kit" idea. It writes one
-self-contained folder (and optionally a zip) per hospital:
+self-contained folder (and optionally a zip) per hospital, plus one for the
+directory:
 
 ```sh
 python scripts/provision.py --zip \
-  --peers hospital-a=http://hospital-a.tail1234.ts.net:8001,hospital-b=http://hospital-b.tail1234.ts.net:8002,hospital-c=http://hospital-c.tail1234.ts.net:8003 \
+  --peers hospital-a=hospital-a.tail1234.ts.net:8001,hospital-b=hospital-b.tail1234.ts.net:8002,hospital-c=hospital-c.tail1234.ts.net:8003,hospital-d=hospital-d.tail1234.ts.net:8004 \
+  --directory directory.tail1234.ts.net:8100 \
   --observer-db postgresql://medchain:medchain@observer.tail1234.ts.net:5432/medchain   # optional
 ```
 
-`--peers` lists every hospital in chain order, each with the address its
-neighbours reach it at: a LAN IP, a Tailscale name or a domain. Addresses must be
-`http://`; `https://` is rejected because the node serves plain HTTP. The command
-writes `kits/hospital-a/`, `kits/hospital-b/` and `kits/hospital-c/`, plus a
-`.zip` of each. Every kit holds:
+`--peers` lists every hospital with the address the others reach it at: a LAN
+IP, a Tailscale name or a domain. Every address is HTTPS (a bare `host:port`
+gets `https://`; `http://` is rejected). The order is the directory's placement
+order between runs. The command writes `kits/hospital-a/` ... `kits/hospital-d/`
+and `kits/directory/`, plus a `.zip` of each. The network's CA and keys live in
+`kits/.pki/` (or `--pki DIR`) and are reused on every later run, so the network
+is never re-keyed. Every hospital kit holds:
 
-- `config/hospital-X.yaml`, pre-filled with the real neighbour addresses, the chain
-  and one freshly generated shared secret. Every kit from the same run gets the
-  same secret. To provision a hospital later, pass that secret with `--secret`.
-  Engine settings come from the repository's `config/hospital-X.yaml`.
+- `config/hospital-X.yaml`: its own address, the directory's address, and one
+  freshly generated shared secret (the same for every kit from the same run; pass
+  it with `--secret` to provision a hospital later). There is no chain in it: the
+  directory places the hospital. Engine settings come from the repository's
+  `config/hospital-X.yaml`.
+- `pki/`: only this hospital's own TLS certificate and key (issued for its
+  address), its update-signing key and its directory credential, plus the CA
+  certificate and the directory's public key. No other party's private key.
 - `docker-compose.hospital.yaml`, which runs only that node.
 - `data/hospital-X.csv`, that hospital's slice. Pass `--data hospital-X=path.csv`
   to use different data.
 - `source/`, the node's build context. With `--image <ref>`, the kit uses a
   prebuilt image instead.
-- `README.md`, with the exact commands.
+- `README.md`, with the exact commands, including how to leave the chain.
 
-The kits contain the shared secret, so send each one privately to that
-hospital's operator. The operator unpacks it and runs one command:
+The directory kit holds the directory's config, its TLS certificate, its
+document-signing key and `hospitals.yaml` (who may register: ids and credential
+hashes only). Send each kit privately to its operator. Start the directory, then
+each hospital, each with one command:
 
 ```sh
-docker compose -f docker-compose.hospital.yaml up -d --build --wait
+docker compose -f docker-compose.directory.yaml up -d --build --wait   # on the directory machine
+docker compose -f docker-compose.hospital.yaml up -d --build --wait    # on each hospital machine
 ```
 
 Start training from any one node (`POST /round/start`, as above). The start
 floods along the chain.
 
-**Changing an address without re-provisioning.** Any node config can be
-re-pointed from the environment: `MEDCHAIN_PEER_<ID>_URL` replaces neighbour
-`<ID>`'s URL, and `MEDCHAIN_ADVERTISE_URL` replaces the node's own address. `<ID>`
-is the node id upper-cased, with `-` and other characters turned into `_`. For
-example:
+**Adding a hospital for real.** Provision it into the same network, then admit
+it and start it:
 
 ```sh
-MEDCHAIN_PEER_HOSPITAL_A_URL=http://100.101.1.10:8001 \
-MEDCHAIN_PEER_HOSPITAL_C_URL=http://hospital-c.tail1234.ts.net:8003 \
-MEDCHAIN_ADVERTISE_URL=http://hospital-b.tail1234.ts.net:8002 \
-NODE_CONFIG=config/hospital-b.yaml python -m node
+python scripts/provision.py --hospital hospital-e --secret <the network secret> \
+  --peers <the same list>,hospital-e=hospital-e.tail1234.ts.net:8005 --directory directory.tail1234.ts.net:8100
+# copy kits/.pki/directory/hospitals.yaml to the directory machine's kits/directory/pki/directory/
+#   (re-read on every registration, no restart); send kits/hospital-e/ to its operator, who runs:
+docker compose -f docker-compose.hospital.yaml up -d --build --wait
 ```
 
-`NODE_CONFIG` can also point at a separate copy of the YAML.
+The node registers; if a run is going, the directory appends it at the end of
+the chain from a round boundary a few rounds ahead, and it joins the run.
+
+**Removing a hospital for real.** On that hospital's machine:
+
+```sh
+docker compose -f docker-compose.hospital.yaml exec hospital-b python -m node.leave
+docker compose -f docker-compose.hospital.yaml down
+```
+
+The directory takes it out at the next boundary and its neighbours bridge. To
+stop it from ever registering again, delete its line from `hospitals.yaml`.
+
+**Changing an address without re-provisioning.** `MEDCHAIN_ADVERTISE_URL`
+replaces a node's own address and `MEDCHAIN_DIRECTORY_URL` the directory's, from
+the environment. On restart the node re-registers its new address and the
+directory passes it to its neighbours. The node's certificate must cover the new
+address: re-run `provision.py` for that hospital with the new address (only its
+certificate is re-issued). A node with a static chain (`chain:` and `neighbours:`
+in its YAML, no `directory:`, as the tests use) still takes
+`MEDCHAIN_PEER_<ID>_URL` for each neighbour: `<ID>` is the node id upper-cased,
+with `-` and other characters turned into `_`.
 
 **The observer is optional.** The dashboard and its Postgres can run on any one
 machine:
 
 ```sh
-MEDCHAIN_SHARED_SECRET=<kit secret> docker compose up -d postgres dashboard
+MEDCHAIN_SHARED_SECRET=<kit secret> NODE_EXTRA_CA_CERTS=kits/.pki/ca.crt docker compose up -d postgres dashboard
 ```
 
 Nodes write telemetry to it only when their kit was provisioned with
@@ -374,21 +580,24 @@ trains and still serves `/status` and `/metrics`.
 ### Prove it
 
 `scripts/verify_multihost.py` is the acceptance test, on real laptops or on one
-machine. Point it at every node's real address. It checks that the nodes agree on
-the chain, starts one run through the first node, waits for every hospital to
-finish, and then reports what crossed the network: per hospital, the rounds
-trained, neighbour updates heard on time, and consensus; per directed link (with
-`--database-url`), packets delivered, packets received with a verified checksum,
-and exact bytes. It exits non-zero if any check fails.
+machine. Point it at every node currently in the chain (any number), with the
+network CA. It checks that the nodes agree on the chain, starts one run through
+the first node, waits for every hospital to finish, and then reports what crossed
+the network: per hospital, the rounds trained, neighbour updates heard on time,
+and consensus; per directed link (with `--database-url`), packets delivered,
+packets received and verified, and exact bytes. It exits non-zero if any check
+fails.
 
 ```sh
-python scripts/verify_multihost.py --secret <kit secret> \
-  --node http://hospital-a.tail1234.ts.net:8001 --node http://hospital-b.tail1234.ts.net:8002 \
-  --node http://hospital-c.tail1234.ts.net:8003 \
+python scripts/verify_multihost.py --secret <kit secret> --ca kits/.pki/ca.crt \
+  --node https://hospital-a.tail1234.ts.net:8001 --node https://hospital-b.tail1234.ts.net:8002 \
+  --node https://hospital-c.tail1234.ts.net:8003 --node https://hospital-d.tail1234.ts.net:8004 \
   --database-url postgresql://medchain:medchain@observer.tail1234.ts.net:5432/medchain
 ```
 
-We ran this on one machine as the stand-in for three laptops. The setup:
+The proof below predates dynamic membership, TLS and signed updates: three
+static-chain kits over plain HTTP. We ran it on one machine as the stand-in for
+three laptops. The setup:
 
 - Three kits, generated with this machine's LAN address (`192.168.0.101`) as
   every peer address.
@@ -430,10 +639,10 @@ This is still one physical machine. Packets crossed real sockets on a real LAN
 address, between nodes that share no Docker network, but not a wire between two
 laptops. On real hardware, the same `verify_multihost.py` run is the test to
 pass. CI runs a smaller version on every push: `tests/unit/test_multihost.py`
-launches three separate `python -m node` processes bound to the runner's own
-network address. Their YAML peer URLs are unresolvable placeholders, and the real
-addresses arrive only through `MEDCHAIN_PEER_<ID>_URL`. The verifier must then
-pass.
+launches three separate `python -m node` processes (static chain) bound to the
+runner's own network address. Their YAML peer URLs are unresolvable placeholders,
+and the real addresses arrive only through `MEDCHAIN_PEER_<ID>_URL`. The verifier
+must then pass.
 
 ## Engines
 
@@ -445,16 +654,18 @@ pass.
 | `gadmm_fp` | `GADMM full precision (float32 deltas)` | `4*d + 8` bytes: the same algorithm with quantization skipped |
 | `gossip` | `naive gossip baseline` | `8*d` bytes: the raw float64 weights, averaged with the neighbours' |
 
-Switch engines by editing `engine:` in the three configs and recreating the
-nodes (`docker compose up -d --force-recreate hospital-a hospital-b hospital-c`).
-The ADMM settings sit next to it: `rho` (24), `alpha` (1.0), `bits` (2),
+Switch engines by editing `engine:` in every config and recreating the nodes
+(`docker compose up -d --force-recreate hospital-a hospital-b hospital-c hospital-d`).
+The ADMM settings sit next to it: `rho` (5), `alpha` (1.0), `bits` (2),
 `local_epochs` (50 full-batch Adam steps per primal step), `lr` (0.01),
-`epsilon` (1e-3), `checkpoint_every` (5), `seed` (42, plus the chain position),
-and `chain` (the node order 1..N). The gossip baseline ignores them.
+`epsilon` (1e-3), `checkpoint_every` (5) and `seed` (42, plus a per-hospital
+offset). The gossip baseline ignores them. The chain order comes from the
+directory; a node without one can instead list `chain` (the node order 1..N) and
+`neighbours` in its YAML, which is what the in-process tests do.
 
 ### How Q-GADMM runs on the chain (`node/qgadmm/`)
 
-- `state.py`: chain positions (odd = HEAD, even = TAIL; the boundary nodes 1 and N
+- `state.py`: chain positions for any N (odd = HEAD, even = TAIL; the boundary nodes 1 and N
   have one neighbour, so one mirror, one dual variable and one penalty term), per-node
   state (`theta`, the quantized self-snapshot `theta_hat`, mirrors of the neighbours'
   snapshots, one `lambda` per edge, all starting at zero) and atomic checkpoints.
@@ -479,6 +690,11 @@ and `chain` (the node order 1..N). The gossip baseline ignores them.
   receiver whose mirror does not match resyncs from the sender's `GET /snapshot`
   (model state only - `theta_hat`, its mirror of the requester and the edge's
   `lambda` - never data) and audits `snapshot_resync` with its byte cost.
+- Membership changes (`node/membership.py`, applied in `scheduler.py` and the engine's
+  `relink`) land on a round boundary: positions are recomputed from the new chain, a
+  removed link's `lambda` and mirror are dropped, a new link starts at `lambda = 0`
+  and stays silent until both ends have each other's full snapshot, and the
+  consensus streak only counts rounds of the current epoch.
 
 ## Honest accounting
 
@@ -498,15 +714,18 @@ pip install -r requirements-dev.txt
 python experiments/compare_engines.py
 ```
 
-Runs gossip, full-precision GADMM and Q-GADMM (b = 8, 4, 2) headless on the same
-three hospital slices with the production engine code and writes to
+Runs gossip, full-precision GADMM and Q-GADMM (b = 8, 4, 2) headless on a chain
+of hospital slices with the production engine code and writes to
 `experiments/out/`: `compare_engines.png` (loss vs cumulative bits transmitted,
 one curve per engine), `rho_sweep.png` (Q-GADMM b=2 at rho = 5, 15, 24, 50),
-`payload_ratio.png` and `summary.json`. On this data every ADMM variant reaches
-the centralized optimum; Q-GADMM b=2 does it in 7.6 kB against gossip's 102 kB
-after 200 rounds (and gossip's hospitals still disagree). At d = 16, b=8 needs
-even fewer total bytes than b=2 because it reaches consensus in 35 rounds instead
-of 159.
+`payload_ratio.png` and `summary.json`. The committed figures use the chain
+A - B - C (the three whole UCI institutions); `--chain` takes any chain of the
+hospitals in `config/`, e.g. `--chain hospital-a,hospital-b,hospital-c,hospital-d,hospital-e`.
+On A - B - C every ADMM variant reaches the centralized optimum; Q-GADMM b=2
+does it in 69 rounds and 3.3 kB against gossip's 204.8 kB after 400 rounds (and
+gossip's hospitals still disagree). At d = 16, b=4 needs even fewer total bytes
+(2.8 kB) because it reaches consensus in 44 rounds. On all five hospitals, b=2
+reaches consensus in 158 rounds and 15.2 kB.
 
 ## How MedChain differs from Flower and NVIDIA FLARE
 
@@ -519,32 +738,39 @@ provisioning step that hands each site a startup kit.
 
 | | Flower / NVIDIA FLARE | MedChain |
 | --- | --- | --- |
-| Topology | Central server; every site connects to it | No server. Each hospital talks only to its chain neighbours (A - B - C) |
+| Topology | Central server; every site connects to it | No training server. Each hospital talks only to its chain neighbours, on a chain of any length |
+| Membership | The server admits clients and selects them each round | A directory decides membership only: where a hospital joins, who bridges when one leaves. It never sees updates and never runs or influences training; if it is down, training goes on |
 | How the model is combined | The server aggregates the site updates (e.g. FedAvg) | Q-GADMM decentralized consensus: each node solves its local ADMM step and exchanges quantized differences with its neighbours |
 | Who sees updates | The server receives every site's update (unless secure aggregation is added) | No node receives every site's update; each gets only its neighbours' quantized differences |
 | What goes on the wire | Model weights or gradients, full precision by default | b-bit stochastic quantization of the change since the last snapshot |
 | Starting a run, observing | The server drives the rounds | A start request floods from whichever node gets it; the dashboard only observes |
-| Site setup | NVIDIA FLARE: one startup kit per site | One kit per hospital (`scripts/provision.py`), the idea borrowed from NVIDIA FLARE |
+| Site setup | NVIDIA FLARE: one startup kit per site | One kit per hospital plus one for the directory (`scripts/provision.py`), the idea borrowed from NVIDIA FLARE |
+| Transport security | TLS (NVIDIA FLARE: mutual TLS from the provisioned kits) | TLS on every link plus an Ed25519 signature on every update, keys from the provisioned kits |
 
 **Measured bandwidth.** The model has d = 16 parameters. Each Q-GADMM b=2 packet
 is 12 bytes, against 64 bytes at 32 bits (5.3x less) and 128 bytes at float64
-(10.7x less). Over a whole run, Q-GADMM b=2 reaches the centralized optimum
-with 7.6 kB on the wire. The gossip baseline sends 102 kB in 200 rounds and its
-hospitals still disagree (`experiments/out/summary.json`). The cross-address
-run above moved 7,824 bytes across its four links, against 83,456 bytes for the
-same 652 messages at float64.
+(10.7x less). Over a whole run on A - B - C, Q-GADMM b=2 reaches the
+centralized optimum with 3.3 kB on the wire. The gossip baseline sends 204.8 kB
+in 400 rounds and its hospitals still disagree (`experiments/out/summary.json`).
+The cross-address run above (at the earlier `rho: 24`) moved 7,824 bytes across
+its four links, against 83,456 bytes for the same 652 messages at float64.
 
 **Trade-offs.** The hub frameworks are mature and scale to many sites, with
-client sampling, many aggregation strategies and certificate-based identity.
-MedChain is a three-node prototype. A chain also has weak points: if the middle
-hospital fails, the chain splits in two, and the survivors keep training on
-their own data until it rejoins.
+client sampling and many aggregation strategies. MedChain is a prototype tested
+with up to five hospitals. A chain also has weak points. A longer chain needs
+more rounds to agree. A planned departure is repaired (the neighbours bridge),
+but a hospital that crashes without notice still splits the chain in two until
+it rejoins, and its neighbours train on their own data meanwhile. Mid-run joins
+only append at the end. The directory is a single point of failure for joins and
+leaves, though not for training.
 
 ## How it fits together
 
 - **One node image, config decides identity** (`config/hospital-*.yaml`: node_id,
-  neighbours, chain, port, engine settings, data_slice). The topology is a chain
-  A - B - C. Peer addresses can be overridden from the environment (see
+  port, address, directory, keys, engine settings, data_slice). The topology is a
+  chain of any length that the directory (`directory/`) assigns and changes at
+  round boundaries; a node can also be given a static chain in its YAML.
+  Addresses can be overridden from the environment (see
   [Running on separate machines](#running-on-separate-machines)).
 - **Peer-to-peer rounds**: a start request floods from the node that receives it;
   the gossip baseline's loop is `node/runner.py`, the ADMM engines' head/tail loop is
@@ -555,14 +781,24 @@ their own data until it rejoins.
 - **Checkpoints**: the ADMM engines pickle their state every `checkpoint_every`
   rounds to a per-node docker volume (`/checkpoints`); a restarted node rejoins its
   run from there.
-- **Shared secret**: `/update`, `/snapshot`, `/round/*` and `/assess*` require the
-  `X-MedChain-Secret` header to match `shared_secret` in the node config (one demo
-  value for all nodes; the dashboard gets it via `MEDCHAIN_SHARED_SECRET`), otherwise
-  401. `/health`, `/status` and `/metrics` stay open.
+- **Identity and transport**: HTTPS on every link, an Ed25519 signature on every
+  `/update` and `/snapshot` (`node/security.py`), and directory-signed membership
+  documents (see [Security between nodes](#security-between-nodes)).
+- **Shared secret**: `/update`, `/snapshot`, `/round/*`, `/membership/leave` and
+  `/assess*` require the `X-MedChain-Secret` header to match `shared_secret` in the
+  node config (one demo value for all nodes; the dashboard gets it via
+  `MEDCHAIN_SHARED_SECRET`), otherwise 401. `/health`, `/status`, `/metrics`,
+  `GET /membership` and `POST /membership` (accepted only with the directory's
+  signature) stay open.
 - **Observer dashboard**: it never coordinates training. Its buttons relay a
-  single start/pause request to one node, which floods it to the others; it learns
-  about each `/update` from the `updates_meta` rows the nodes write. Killing the
-  dashboard does not affect a run (tested).
+  single start/pause request to one node in the chain, which floods it to the
+  others; it learns about each `/update` from the `updates_meta` rows the nodes
+  write. Killing the dashboard does not affect a run (tested). It follows
+  membership from what the nodes write: the topology page draws the current chain
+  in order, the consensus panel shows only the current links and resets with each
+  change, the network training loss averages over the members of each round's
+  chain, and the communication page shows the current hospital and link count and
+  each round's hospital count.
 - **Risk assessment is separate from training** (`node/assess/`): its models
   are trained centrally, not by the training engines. The dashboard relays each
   request to the node you pick and stores nothing. `/status` reports whether
@@ -571,12 +807,15 @@ their own data until it rejoins.
 ## Layout
 
 ```
-docker-compose.yml   config/        node/          dashboard/
-design/              assets/svg/    data/          tests/        experiments/
+docker-compose.yml   config/        node/          directory/     dashboard/
+design/              assets/svg/    data/          tests/         experiments/
 docs/screenshots/    models/        scripts/
 ```
 
-- `scripts/provision.py` writes the per-hospital kits, and
+- `directory/` is the membership directory (`python -m directory`, same image as
+  the nodes). `scripts/pki.py` issues the CA, certificates, signing keys and
+  directory credentials (the compose `pki` service runs it).
+- `scripts/provision.py` writes the per-hospital and directory kits, and
   `scripts/verify_multihost.py` checks a run across real addresses (see
   [Running on separate machines](#running-on-separate-machines)).
   `docs/multihost/proof-report.json` is the report from the single-machine
@@ -586,8 +825,9 @@ docs/screenshots/    models/        scripts/
   adapted.
 - `assets/generate_svgs.py` regenerates `assets/svg/`. `assets/preview.html`
   shows every asset on the cream canvas.
-- `data/prepare_uci.py` re-downloads UCI Heart Disease and rebuilds the three
-  non-IID slices (Cleveland, Hungarian, VA Long Beach). See `data/README.md`.
+- `data/prepare_uci.py` re-downloads UCI Heart Disease and rebuilds the five
+  non-IID slices (Cleveland, Hungarian, VA Long Beach, and the Swiss file split
+  in two halves for hospitals D and E). See `data/README.md`.
 - `data/cardio/` holds the Kaggle CSV the tabular risk model trains on, and
   `data/prepare_ecg.py` fetches the ECG images. `models/` holds the exported
   ECG model. `python -m node.assess.train_tabular` writes the tabular model
@@ -598,20 +838,29 @@ docs/screenshots/    models/        scripts/
 ```sh
 pip install -r requirements-dev.txt
 pytest tests/unit                                   # no docker needed
+(cd dashboard && npm ci && npm test)                # dashboard snapshot maths
 docker compose up -d --build --wait
-MEDCHAIN_STACK=1 pytest tests/integration -v        # real runs, real docker kill
+MEDCHAIN_STACK=1 pytest tests/integration -v        # real runs, real docker kill, a join and a leave
 ```
 
 `tests/unit` covers quantizer unbiasedness, sender/receiver round-trip
 determinism (exact float equality over 50 rounds), the boundary nodes' single
 penalty/dual term, convergence sanity (N = 5 synthetic linear regression: Q-GADMM
-b=2 within 1% of full-precision GADMM and 2% of centralized scikit-learn), and a
-three-node chain of real node apps over HTTP in one process, including a tail
-kill and checkpoint rejoin, plus the risk-assessment endpoints (JSON and PDF
-reports for the tabular and ECG models). It also covers the peer-address environment
-overrides, the provisioning kit's files and substituted addresses, and three nodes
-as separate OS processes on the host's network address, checked by
-`scripts/verify_multihost.py`. `tests/integration` runs against whichever engine the
-configs select; CI (`.github/workflows/ci.yml`) runs it for `qgadmm`, `gadmm_fp`
-and `gossip`, plus the unit tests, the dashboard build, the docker build and a
-headless `compare_engines.py` run.
+b=2 within 1% of full-precision GADMM and 2% of centralized scikit-learn), and
+chains of real node apps over HTTP in one process: three nodes, including a tail
+kill and checkpoint rejoin; four and five nodes (head/tail alternation, every link
+every round, consensus); and, through the directory over TLS with signed updates,
+a fourth hospital joining a running chain of three, a middle hospital of four
+leaving with its neighbours bridging, a crash that changes no membership, the
+directory going down mid-run, rejected tampered, unsigned, foreign-key, replayed
+and unknown-sender updates, forged membership documents and bad credentials
+(`test_chain_n.py`, `test_membership.py`). It also covers the risk-assessment
+endpoints, the address overrides, the provisioning kits and three nodes as
+separate OS processes on the host's network address, checked by
+`scripts/verify_multihost.py`. `dashboard/server/snapshot.test.js` covers the
+dashboard's topology, consensus, network loss and communication numbers across a
+join and a leave. `tests/integration` runs against whichever engine the configs
+select, including a live join then leave checked on the dashboard; CI
+(`.github/workflows/ci.yml`) runs it for `qgadmm`, `gadmm_fp` and `gossip`, plus
+the unit and dashboard tests, the dashboard build, the docker build and headless
+`compare_engines.py` runs on three and five hospitals.
