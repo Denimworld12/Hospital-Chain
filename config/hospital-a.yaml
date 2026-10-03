@@ -26,8 +26,9 @@ tls:
 signing_key: /pki/hospital-a/signing.key
 
 # Pre-shared secret every peer (and the dashboard relay) sends in the
-# X-MedChain-Secret header on /snapshot, /round/* and /membership/leave. Same value
-# on all nodes. (Who sent an /update is proven by its signature, not by this.)
+# X-MedChain-Secret header on /snapshot, /round/*, GET /membership and
+# /membership/leave. Same value on all nodes. (Who sent an /update is proven by
+# its signature, not by this.)
 shared_secret: medchain-demo-secret
 
 # Only this hospital's own slice is mounted into its container.

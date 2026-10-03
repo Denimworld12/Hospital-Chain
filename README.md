@@ -454,7 +454,7 @@ it is not once hospitals run on separate machines. So:
   responses are signed the same way, since a snapshot replaces a mirror
   wholesale.
 - The shared secret (`X-MedChain-Secret`) still guards `/round/*`,
-  `/snapshot`, `/membership/leave` and `/assess*`.
+  `/snapshot`, `GET /membership`, `/membership/leave` and `/assess*`.
 
 The demo issues everything itself (`scripts/pki.py`: a self-signed CA,
 certificates, signing keys, credentials). **For a real deployment**, issue the
@@ -784,12 +784,12 @@ leaves, though not for training.
 - **Identity and transport**: HTTPS on every link, an Ed25519 signature on every
   `/update` and `/snapshot` (`node/security.py`), and directory-signed membership
   documents (see [Security between nodes](#security-between-nodes)).
-- **Shared secret**: `/update`, `/snapshot`, `/round/*`, `/membership/leave` and
-  `/assess*` require the `X-MedChain-Secret` header to match `shared_secret` in the
-  node config (one demo value for all nodes; the dashboard gets it via
-  `MEDCHAIN_SHARED_SECRET`), otherwise 401. `/health`, `/status`, `/metrics`,
-  `GET /membership` and `POST /membership` (accepted only with the directory's
-  signature) stay open.
+- **Shared secret**: `/update`, `/snapshot`, `/round/*`, `GET /membership`,
+  `/membership/leave` and `/assess*` require the `X-MedChain-Secret` header to
+  match `shared_secret` in the node config (one demo value for all nodes; the
+  dashboard gets it via `MEDCHAIN_SHARED_SECRET`), otherwise 401. `/health`,
+  `/status`, `/metrics` and `POST /membership` (accepted only with the
+  directory's signature) stay open.
 - **Observer dashboard**: it never coordinates training. Its buttons relay a
   single start/pause request to one node in the chain, which floods it to the
   others; it learns about each `/update` from the `updates_meta` rows the nodes
