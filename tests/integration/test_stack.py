@@ -70,6 +70,11 @@ def post_node(node_id: str, path: str, **kw):
     return httpx.post(f"{node_url(node_id)}{path}", headers={"X-MedChain-Secret": secret}, timeout=30, verify=CA, **kw)
 
 
+def in_chain(rows: list[dict]) -> list[dict]:
+    """Snapshot node rows of hospitals in the chain (a hospital that joined and left keeps its row)."""
+    return [n for n in rows if n.get("in_chain") is not False]
+
+
 def current_chain() -> list[str]:
     return get(f"{node_url(STARTED[0])}/status").json()["chain"]
 
@@ -181,12 +186,13 @@ def test_health_and_registration():
 
     def registered():
         s = snapshot()
-        return s if len(s["nodes"]) == len(NODES) and all(n["status"] == "alive" for n in s["nodes"]) else None
+        members = in_chain(s["nodes"])
+        return s if len(members) == len(NODES) and all(n["status"] == "alive" for n in members) else None
 
     snap = wait_until(registered, 15, what="all nodes registered and alive")
-    assert {n["node_id"] for n in snap["nodes"]} == set(NODES)
-    assert all(n["seconds_since_heartbeat"] < 7 for n in snap["nodes"])
-    assert all(n["engine"] == LABEL for n in snap["nodes"])
+    assert {n["node_id"] for n in in_chain(snap["nodes"])} == set(NODES)
+    assert all(n["seconds_since_heartbeat"] < 7 for n in in_chain(snap["nodes"]))
+    assert all(n["engine"] == LABEL for n in in_chain(snap["nodes"]))
 
 
 def test_dashboard_renders():
@@ -206,7 +212,7 @@ def test_websocket_pushes_live_snapshots():
         second = next(m for m in (json.loads(ws.recv(timeout=5)) for _ in range(20)) if m["type"] == "snapshot")
     assert first["type"] == second["type"] == "snapshot"
     assert second["data"]["generated_at"] > first["data"]["generated_at"]
-    assert {n["node_id"] for n in second["data"]["nodes"]} == set(NODES)
+    assert {n["node_id"] for n in in_chain(second["data"]["nodes"])} == set(NODES)
 
 
 PATIENT = {"age": 58, "gender": "male", "height": 172, "weight": 88, "ap_hi": 150, "ap_lo": 95,
