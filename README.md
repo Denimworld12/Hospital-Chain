@@ -661,7 +661,8 @@ machine. Point it at every node currently in the chain (any number), with the
 network CA. It checks that the nodes agree on the chain, starts one run through
 the first node, waits for every hospital to finish, and then reports what crossed
 the network: per hospital, the rounds trained, neighbour updates heard on time,
-and consensus; per directed link (with `--database-url`), packets delivered,
+and consensus; per directed link (with `--database-url`, run on the hub, where
+Postgres listens on loopback only), packets delivered,
 packets received and verified, and exact bytes. It exits non-zero if any check
 fails.
 
@@ -669,7 +670,7 @@ fails.
 python scripts/verify_multihost.py --secret <kit secret> --ca kits/.pki/ca.crt \
   --node https://hospital-a.tail1234.ts.net:8001 --node https://hospital-b.tail1234.ts.net:8002 \
   --node https://hospital-c.tail1234.ts.net:8003 --node https://hospital-d.tail1234.ts.net:8004 \
-  --database-url postgresql://medchain:medchain@observer.tail1234.ts.net:5432/medchain
+  --database-url postgresql://medchain:medchain@127.0.0.1:5432/medchain
 ```
 
 The proof below predates dynamic membership, TLS and signed updates: three
