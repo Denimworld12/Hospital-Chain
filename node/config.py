@@ -1,7 +1,10 @@
-"""Node configuration, loaded from the YAML file named by $NODE_CONFIG.
+"""Node configuration: the frozen `NodeConfig` every part of the node receives.
 
-Nothing in node/ hardcodes a hospital identity: node_id, neighbours, port, data
-slice, shared secret and engine parameters all come from this file.
+`load_config` (node/settings.py) builds it from, in order of precedence, the
+environment, the optional YAML file named by $NODE_CONFIG, and the defaults here;
+`build_config` validates the merged result. Nothing in node/ hardcodes a hospital
+identity: node_id, neighbours, port, data slice, shared secret and engine
+parameters all come from configuration.
 
 Engines (`engine:`, exactly one of these): `gossip` (the naive baseline),
 `qgadmm` (Q-GADMM, `bits` in {2, 4, 8}) and `gadmm_fp` (full-precision
@@ -18,27 +21,34 @@ Membership comes from one of two places:
                 `chain`/`neighbours` are then left out.
 
 Security (both optional for local development; the shipped compose stack and the
-provisioning kits always set them): `tls:` (cert, key, ca) serves HTTPS and verifies
-peers against the network CA, and `signing_key:` is this node's Ed25519 key. A node
+provisioning kits always set them): `tls:` (cert, key, ca) serves HTTPS, verifies
+peers' certificates against the network CA and pins each peer's key
+(node/pinning.py): the directory block then needs `tls_pin` (the directory's key,
+from the kit) and each static neighbour a `tls_pin`; with a directory, the other
+hospitals' pins come from its signed membership documents. `signing_key:` is this
+node's Ed25519 key. A node
 with a signing key signs every /update and /snapshot it sends and rejects any update
 whose sender it has no public key for, or whose signature does not verify.
 
-Addresses are deployment, not identity, so they can be overridden from the
-environment without editing the YAML: $MEDCHAIN_ADVERTISE_URL replaces
-`advertise_url`, and $MEDCHAIN_PEER_<ID>_URL replaces the `url` of neighbour <ID>
-(upper-cased, every run of other characters as `_`: hospital-b ->
-MEDCHAIN_PEER_HOSPITAL_B_URL), and $MEDCHAIN_DIRECTORY_URL replaces `directory.url`. That is how the same config points at Docker
-service names on one machine and at LAN IPs or Tailscale names across machines.
+Addresses are deployment, not identity, so they come from the environment without
+editing the YAML (node/settings.py lists every variable): $ADVERTISE_ADDR (alias
+$MEDCHAIN_ADVERTISE_URL) replaces `advertise_url` and is required with a directory,
+$DIRECTORY_URL (alias $MEDCHAIN_DIRECTORY_URL) replaces `directory.url`, and
+$MEDCHAIN_PEER_<ID>_URL replaces the `url` of static neighbour <ID> (upper-cased,
+every run of other characters as `_`: hospital-b -> MEDCHAIN_PEER_HOSPITAL_B_URL).
+That is how the same config points at Docker service names on one machine and at
+LAN IPs or Tailscale names across machines.
+
+Telemetry goes to the observer service (observer/) named by an `observer:` block
+(url, token, and with TLS its `tls_pin`); see node/writer.py.
 """
 
 from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-
-import yaml
 
 
 @dataclass(frozen=True)
@@ -46,6 +56,7 @@ class Neighbour:
     id: str
     url: str
     public_key: str | None = None  # base64 Ed25519 key that verifies this neighbour's signatures
+    tls_pin: str | None = None  # SHA-256 of its TLS certificate key (node/pinning.py); required with TLS
 
 
 @dataclass(frozen=True)
@@ -60,6 +71,7 @@ class DirectoryConfig:
     url: str
     credential_ref: str  # this hospital's pre-shared registration credential, inline or `file:<path>`
     public_key_ref: str  # base64 Ed25519 key that verifies the directory's documents, inline or `file:<path>`
+    tls_pin_ref: str | None = None  # the directory's TLS key pin, `sha256:<hex>` or `file:<its tls.crt>` (from the kit)
 
     # read when used, not when the config loads, so a config can be inspected away from its key files
     @property
@@ -70,6 +82,38 @@ class DirectoryConfig:
     @property
     def public_key(self) -> str:
         return _read_key(None, self.public_key_ref)
+
+    @property
+    def tls_pin(self) -> str | None:
+        from .pinning import parse_pin
+
+        return parse_pin(self.tls_pin_ref) if self.tls_pin_ref else None
+
+
+@dataclass(frozen=True)
+class ObserverConfig:
+    """Where this node pushes its telemetry (observer/): never waited for by training."""
+
+    url: str
+    token_ref: str  # the observer's ingest token, inline or `file:<path>`
+    tls_pin_ref: str | None = None  # the observer's TLS key pin (sha256:<hex> or file:<its tls.crt>), with TLS
+
+    @property
+    def token(self) -> str:
+        ref = self.token_ref
+        return Path(ref[5:]).read_text().strip() if ref.startswith("file:") else ref
+
+    @property
+    def tls_pin(self) -> str | None:
+        from .pinning import parse_pin
+
+        return parse_pin(self.tls_pin_ref) if self.tls_pin_ref else None
+
+
+@dataclass(frozen=True)
+class HttpConfig:
+    connect_timeout_s: float = 1.5
+    read_timeout_s: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -96,6 +140,7 @@ ADMM_ENGINES = (QGADMM, GADMM_FP)
 
 ADVERTISE_URL_ENV = "MEDCHAIN_ADVERTISE_URL"
 DIRECTORY_URL_ENV = "MEDCHAIN_DIRECTORY_URL"
+DEFAULT_PORT = 8000
 
 
 def peer_url_env(node_id: str) -> str:
@@ -133,12 +178,16 @@ class NodeConfig:
     checkpoint_every: int = 5
     checkpoint_dir: str = "/checkpoints"
     seed: int = 42
+    data_path: str | None = None  # node state that must survive a restart (saved membership); default checkpoint_dir
     training: TrainingConfig = field(default_factory=TrainingConfig)
     timing: TimingConfig = field(default_factory=TimingConfig)
     assess: AssessConfig = field(default_factory=AssessConfig)
     tls: TlsConfig | None = None
     signing_key: str | None = None
     directory: DirectoryConfig | None = None
+    observer: ObserverConfig | None = None
+    http: HttpConfig = field(default_factory=HttpConfig)
+    image_version: str = "dev"
 
     @property
     def scheme(self) -> str:
@@ -151,25 +200,39 @@ class NodeConfig:
     def is_admm(self) -> bool:
         return self.engine in ADMM_ENGINES
 
+    @property
+    def state_dir(self) -> str:
+        return self.data_path or self.checkpoint_dir
+
 
 def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
-    path = Path(path or os.environ.get("NODE_CONFIG", ""))
-    if not path.is_file():
-        raise FileNotFoundError(f"node config not found: {path!s} (set NODE_CONFIG)")
-    raw = yaml.safe_load(path.read_text()) or {}
-    missing = [k for k in ("node_id", "port", "data_slice", "shared_secret") if k not in raw]
+    """Environment > YAML ($NODE_CONFIG or `path`, optional) > defaults; see node/settings.py."""
+    from .settings import load_config as load
+
+    return load(path)
+
+
+def build_config(raw: dict, path: str = "config") -> NodeConfig:
+    """Validate one merged configuration (`path` names its source in error messages)."""
+    raw = dict(raw)
+    if raw.get("data_path"):  # DATA_PATH holds the slice and the checkpoints unless they are named
+        raw.setdefault("checkpoint_dir", str(Path(raw["data_path"]) / "checkpoints"))
+        if raw.get("node_id"):
+            raw.setdefault("data_slice", str(Path(raw["data_path"]) / f"{raw['node_id']}.csv"))
+    missing = [k for k in ("node_id", "data_slice", "shared_secret") if k not in raw]
     if missing:
         raise ValueError(f"{path}: missing required keys {missing}")
     neighbours = tuple(
-        Neighbour(id=str(n["id"]), url=_env_url(path, peer_url_env(str(n["id"])), str(n["url"])),
-                  public_key=_read_key(path, n.get("public_key")))
+        Neighbour(id=str(n["id"]), url=str(n["url"]).rstrip("/"),
+                  public_key=_read_key(path, n.get("public_key")),
+                  tls_pin=_read_pin(path, n.get("tls_pin")))
         for n in raw.get("neighbours") or []
     )
     if any(n.id == raw["node_id"] for n in neighbours):
         raise ValueError(f"{path}: a node cannot be its own neighbour")
     if not str(raw["shared_secret"]):
         raise ValueError(f"{path}: shared_secret must not be empty")
-    port = int(raw["port"])
+    port = int(raw.get("port", DEFAULT_PORT))
     engine = str(raw.get("engine", GOSSIP))
     if engine not in ENGINE_ALIASES:
         raise ValueError(f"{path}: unknown engine {engine!r}; use one of {sorted(ENGINE_ALIASES)}")
@@ -181,9 +244,30 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
     if engine in ADMM_ENGINES and not directory:
         _check_chain(path, str(raw["node_id"]), chain, neighbours)
     tls = TlsConfig(**{k: str(v) for k, v in raw["tls"].items()}) if raw.get("tls") else None
-    advertise_url = _env_url(path, ADVERTISE_URL_ENV, str(raw.get("advertise_url", f"{'https' if tls else 'http'}://{raw['node_id']}:{port}")))
+    if tls:  # peers are identified by their pinned TLS key, not by the address they are dialled at
+        unpinned = [n.id for n in neighbours if not n.tls_pin]
+        if unpinned:
+            raise ValueError(f"{path}: with `tls:` every neighbour needs a `tls_pin` (sha256:<hex> or "
+                             f"file:<its tls.crt>); missing for {unpinned}")
+        if directory and not directory.tls_pin_ref:
+            raise ValueError(f"{path}: with `tls:` the directory block needs `tls_pin` (the directory's key pin "
+                             "from this hospital's kit, e.g. file:/pki/directory/tls.crt)")
     scheme = "https" if tls else "http"
-    for url in [advertise_url, *(n.url for n in neighbours), *([directory.url] if directory else [])]:
+    # one port for binding and for the advertised address; no fallback to the node id as a hostname
+    advertise_url = _address(raw.get("advertise_url"), scheme, port)
+    if directory and not advertise_url:
+        raise ValueError(f"{path}: a node with a directory must say where its peers reach it: set ADVERTISE_ADDR "
+                         "(host:port, host, or a URL) or `advertise_url`")
+    if directory:
+        directory = replace(directory, url=_address(directory.url, scheme, None))
+    observer = _observer(path, raw.get("observer"), scheme)
+    if tls and observer and not observer.tls_pin_ref:
+        raise ValueError(f"{path}: with `tls:` the observer block needs `tls_pin` (the observer's key pin, "
+                         "e.g. file:/pki/observer/tls.crt)")
+    for url in [advertise_url, *(n.url for n in neighbours), *([directory.url] if directory else []),
+                *([observer.url] if observer else [])]:
+        if not url:
+            continue
         if not url.startswith(f"{scheme}://"):
             raise ValueError(f"{path}: {url} must be {scheme}:// ({'TLS is on' if tls else 'no `tls:` configured'})")
     return NodeConfig(
@@ -206,12 +290,16 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
         checkpoint_every=int(raw.get("checkpoint_every", 5)),
         checkpoint_dir=str(raw.get("checkpoint_dir", "/checkpoints")),
         seed=int(raw.get("seed", 42)),
+        data_path=str(raw["data_path"]) if raw.get("data_path") else None,
         training=TrainingConfig(**(raw.get("training") or {})),
         timing=TimingConfig(**(raw.get("timing") or {})),
         assess=AssessConfig(**(raw.get("assess") or {})),
         tls=tls,
         signing_key=str(raw["signing_key"]) if raw.get("signing_key") else None,
         directory=directory,
+        observer=observer,
+        http=HttpConfig(**{k: float(v) for k, v in (raw.get("http") or {}).items()}),
+        image_version=str(raw.get("image_version") or "dev"),
     )
 
 
@@ -227,6 +315,17 @@ def _read_key(path, value) -> str | None:
     return value
 
 
+def _read_pin(path, value) -> str | None:
+    if not value:
+        return None
+    from .pinning import parse_pin
+
+    try:
+        return parse_pin(str(value))
+    except (ValueError, OSError) as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+
+
 def _directory(path, raw) -> DirectoryConfig | None:
     if not raw:
         return None
@@ -236,8 +335,31 @@ def _directory(path, raw) -> DirectoryConfig | None:
     if missing:
         raise ValueError(f"{path}: directory needs {missing}")
     credential = str(raw["credential"]) if raw.get("credential") else f"file:{raw['credential_file']}"
-    return DirectoryConfig(url=_env_url(path, DIRECTORY_URL_ENV, str(raw["url"])), credential_ref=credential,
-                           public_key_ref=str(raw["public_key"]))
+    return DirectoryConfig(url=str(raw["url"]).rstrip("/"), credential_ref=credential,
+                           public_key_ref=str(raw["public_key"]),
+                           tls_pin_ref=str(raw["tls_pin"]) if raw.get("tls_pin") else None)
+
+
+def _address(value, scheme: str, port: int | None) -> str:
+    """A URL as given, or `host[:port]` completed with the scheme (and this node's port when it has none)."""
+    value = str(value or "").strip().rstrip("/")
+    if not value or "://" in value:
+        return value
+    _, sep, last = value.rpartition(":")
+    has_port = bool(sep) and last.isdigit()  # "[::1]" ends in "1]", not a port
+    return f"{scheme}://{value}" if has_port or port is None else f"{scheme}://{value}:{port}"
+
+
+def _observer(path, raw, scheme: str) -> ObserverConfig | None:
+    if not raw:
+        return None
+    if not raw.get("url"):
+        raise ValueError(f"{path}: observer needs `url`")
+    if not (raw.get("token") or raw.get("token_file")):
+        raise ValueError(f"{path}: observer needs `token` or `token_file` (its ingest token)")
+    token = str(raw["token"]) if raw.get("token") else f"file:{raw['token_file']}"
+    return ObserverConfig(url=_address(raw["url"], scheme, None), token_ref=token,
+                          tls_pin_ref=str(raw["tls_pin"]) if raw.get("tls_pin") else None)
 
 
 def _env_url(path, var: str, configured: str) -> str:

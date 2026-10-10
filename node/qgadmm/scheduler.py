@@ -58,7 +58,7 @@ from typing import Callable, Mapping, Sequence
 
 import httpx
 
-from .. import security, wire
+from .. import pinning, security, wire
 from ..engine import NeighborUpdate, UpdatePackage
 from ..runner import ACTIVE, RoundMetrics, Runner
 from . import engine as qengine
@@ -114,7 +114,6 @@ def simulate(engines: Sequence, rounds: int, *, epsilon: float = 1e-3, stop_on_c
     chain = order[0].pos.chain
     if [e.pos.node_id for e in order] != list(chain):
         raise ValueError("simulate() needs exactly one engine per chain position")
-    by_id = {e.pos.node_id: e for e in order}
     heads = [e for e in order if e.pos.group == HEAD]
     tails = [e for e in order if e.pos.group == TAIL]
     edges = all_edges(chain)
@@ -509,7 +508,10 @@ class ChainRoundScheduler(Runner):
             resp = await self.client.get(f"{n.url}/snapshot", params=params,
                                          headers={wire.H_SECRET: self.cfg.shared_secret})
         except httpx.HTTPError as exc:
-            log.warning("snapshot from %s failed: %s", m, type(exc).__name__)
+            if pinning.is_pin_error(exc):
+                self.tls_refused(m, exc, self.run_id, self.current_round)
+            else:
+                log.warning("snapshot from %s failed: %s", m, type(exc).__name__)
             return None
         if resp.status_code != 200:
             log.warning("snapshot from %s refused: %s", m, resp.status_code)

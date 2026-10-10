@@ -214,8 +214,8 @@ def test_tampered_or_unsigned_or_unknown_updates_are_rejected(net, tmp_path):
     a_key = security.load_signing_key(a.cfg.signing_key)
     body = b"\x02\x00\x00\x00" + bytes(8)
 
-    def post(content, headers):
-        return httpx.post(f"{b.url}/update", content=content, headers=headers, verify=b.verify, timeout=5)
+    def post(content, headers):  # over a connection that presents a's certificate, as a really does
+        return httpx.post(f"{b.url}/update", content=content, headers=headers, verify=a.identity(), timeout=5)
 
     ok = post(body, signed_update(a_key, "hospital-a", "hospital-b", body))
     assert ok.status_code == 200, ok.text  # a correctly signed packet from a real neighbour is accepted

@@ -1,8 +1,9 @@
-# MedChain: a chain of hospital nodes + a membership directory + postgres + observer dashboard.
+# MedChain: a chain of hospital nodes + a membership directory + an observer (telemetry) + postgres + dashboard.
 #
-#   docker compose up --build        four hospitals (A - B - C - D); open http://localhost:8080
-#   docker compose --profile join up -d hospital-e      a fifth hospital joins, mid-run if one is going
+#   make up  (= docker compose up -d --build --wait)   three hospitals (A - B - C); open http://localhost:8080
+#   docker compose --profile join up -d hospital-d      hospital D (Swiss data) joins, mid-run if one is going
 #   docker compose exec hospital-b python -m node.leave  hospital-b leaves; A and C bridge to each other
+#   docker compose --profile spare up -d hospital-e     a spare fifth hospital, for longer chains
 #
 # Every node runs the same image; the mounted YAML config decides which hospital it is.
 # Where it sits in the chain comes from the directory, which coordinates membership
@@ -13,6 +14,9 @@
 # checkpoint their own model state to a per-node volume, so a killed node rejoins its
 # run on restart. The `pki` service issues the demo CA, certificates, signing keys and
 # directory credentials into ./.pki on first start (scripts/pki.py; kept on later starts).
+# Nodes push their telemetry to the observer over HTTPS with its token, exactly as nodes on
+# other machines do; only the observer and the dashboard talk to Postgres, which is
+# published on this machine's loopback only.
 
 x-node: &node
   build:
@@ -20,10 +24,12 @@ x-node: &node
     dockerfile: node/Dockerfile
   image: medchain-node:latest
   environment: &node-env
-    DATABASE_URL: postgresql://medchain:medchain@postgres:5432/medchain
+    OBSERVER_URL: https://observer:8200
+    OBSERVER_TOKEN: ${MEDCHAIN_OBSERVER_TOKEN:-medchain-demo-observer-token}
+    OBSERVER_TLS_PIN: file:/pki/observer/tls.crt  # the observer's TLS key, pinned like the directory's
   depends_on: &node-deps
-    postgres:
-      condition: service_healthy
+    observer:
+      condition: service_started
     pki:
       condition: service_completed_successfully
     directory:
@@ -39,7 +45,7 @@ services:
       POSTGRES_PASSWORD: medchain
       POSTGRES_DB: medchain
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"  # loopback only: nodes never connect to Postgres, the observer does
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U medchain -d medchain"]
       interval: 2s
@@ -57,6 +63,7 @@ services:
       - scripts/pki.py
       - --out=/pki
       - --directory=directory:directory,localhost,127.0.0.1
+      - --service=observer:observer,localhost,127.0.0.1
       - --hospital=hospital-a:hospital-a,localhost,127.0.0.1
       - --hospital=hospital-b:hospital-b,localhost,127.0.0.1
       - --hospital=hospital-c:hospital-c,localhost,127.0.0.1
@@ -85,6 +92,34 @@ services:
       - "8100:8100"
     healthcheck:
       test: ["CMD", "python", "-c", "import ssl,urllib.request;urllib.request.urlopen('https://127.0.0.1:8100/health',timeout=2,context=ssl._create_unverified_context())"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: "no"
+
+  # Takes the nodes' pushed telemetry (POST /ingest with its token) into Postgres for the dashboard.
+  # Training never waits for it: each node queues its writes and sends them from a background thread.
+  observer:
+    image: medchain-node:latest
+    container_name: observer
+    command: ["python", "-m", "observer"]
+    environment:
+      DATABASE_URL: postgresql://medchain:medchain@postgres:5432/medchain
+      OBSERVER_TOKEN: ${MEDCHAIN_OBSERVER_TOKEN:-medchain-demo-observer-token}
+      TLS_CERT: /pki/observer/tls.crt
+      TLS_KEY: /pki/observer/tls.key
+      TLS_CA: /pki/ca.crt
+    volumes:
+      - ./.pki:/pki:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pki:
+        condition: service_completed_successfully
+    ports:
+      - "8200:8200"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import ssl,urllib.request;urllib.request.urlopen('https://127.0.0.1:8200/health',timeout=2,context=ssl._create_unverified_context())"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -132,8 +167,11 @@ services:
     ports:
       - "8003:8003"
 
+  # Not started by a plain `docker compose up`: the mid-demo joiner (Swiss data; on the hub laptop in a
+  # multi-machine demo). Start it to watch a hospital join a running chain.
   hospital-d:
     <<: *node
+    profiles: ["join"]
     container_name: hospital-d
     environment:
       <<: *node-env
@@ -146,10 +184,10 @@ services:
     ports:
       - "8004:8004"
 
-  # Not started by a plain `docker compose up`: start it to watch a hospital join a running chain.
+  # A spare hospital (the other half of the Swiss data), for longer chains.
   hospital-e:
     <<: *node
-    profiles: ["join"]
+    profiles: ["spare"]
     container_name: hospital-e
     environment:
       <<: *node-env

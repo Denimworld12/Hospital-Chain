@@ -1,0 +1,5 @@
+# Minimal Python lint: ruff's default rules (pyflakes and the pycodestyle errors), no formatter.
+# `make lint` checks changed files only; there is no repo-wide reformatting pass.
+target-version = "py312"
+line-length = 120
+extend-exclude = [".venv", "kits", ".pki", "dashboard"]

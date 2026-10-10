@@ -3,9 +3,11 @@
 What it does, and only this:
 
     POST /register   a hospital proves who it is (its own pre-shared credential) and
-                     says where it can be reached and which key signs its updates. A
-                     hospital already in the chain gets the current document back; a new
-                     one is placed in the chain and every member is told.
+                     says where it can be reached, which key signs its updates and which
+                     key its TLS certificate carries (its pin, node/pinning.py; it must
+                     connect with that very certificate). A hospital already in the
+                     chain gets the current document back; a new one is placed in the
+                     chain and every member is told.
     POST /leave      planned departure: the hospital is taken out and its two neighbours
                      are told to bridge to each other.
     GET  /membership the current signed membership document.
@@ -42,7 +44,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from node import security
+from node import pinning, security
 from node.discovery import push_membership
 from node.membership import Member, Membership
 
@@ -92,6 +94,7 @@ class RegisterRequest(BaseModel):
     public_key: str | None = None
     display_name: str | None = None
     patients: int | None = None
+    tls_spki_sha256: str | None = None  # the pin of the TLS certificate this registration connects with
 
 
 class LeaveRequest(BaseModel):
@@ -128,6 +131,26 @@ def create_app(cfg: DirectoryConfig | None = None) -> FastAPI:
         if not given or not any(hmac.compare_digest(credential_hash(given), str(h["credential_sha256"]))
                                 for h in hospitals()):
             raise HTTPException(401, detail="a hospital credential is required")
+
+    def expected_pins(host: str, port: int) -> list[pinning.Pin]:
+        """Whose key may answer at host:port: a member of the current or the previous chain (a leaver)."""
+        parties = [(m.id, m.display_name or m.id, m.url, m.tls_pin) for doc in store.recent(2) for m in doc.members.values()]
+        return pinning.pins_at(host, port, parties)
+
+    def require_own_key(request: Request, req: RegisterRequest) -> None:
+        """A hospital registers a TLS key only by proving it holds it: the connection must present that certificate."""
+        if not cfg.tls_cert:
+            return
+        if not req.tls_spki_sha256:
+            raise HTTPException(400, detail="register with tls_spki_sha256, the pin of your TLS certificate's key")
+        presented = pinning.peer_spki(request)
+        if presented is None:
+            store.log("auth_failed", req.node_id, {"reason": "no client certificate"})
+            raise HTTPException(401, detail=f"{req.node_id} must connect with its kit's TLS certificate to register")
+        if presented != req.tls_spki_sha256:
+            store.log("auth_failed", req.node_id, {"reason": "registered key is not the connection's certificate"})
+            raise HTTPException(403, detail=f"the TLS key registered for {req.node_id} is not the key of the "
+                                            "certificate this registration connected with")
 
     async def statuses(chain) -> dict[str, dict]:
         """Members' public GET /status (run id, round, stop) - never anything about the model."""
@@ -172,8 +195,9 @@ def create_app(cfg: DirectoryConfig | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        verify = security.client_ssl_context(cfg.ca) if cfg.ca else True
-        state["client"] = httpx.AsyncClient(timeout=httpx.Timeout(3.0, connect=1.5), verify=verify)
+        timeout = httpx.Timeout(3.0, connect=1.5)
+        state["client"] = (pinning.pinned_client(cfg.ca, cfg.tls_cert, cfg.tls_key, expected_pins, timeout) if cfg.ca
+                           else httpx.AsyncClient(timeout=timeout))
         log.info("directory up on :%d (%s), %d hospitals known", cfg.port, "https" if cfg.tls_cert else "http",
                  len(hospitals()))
         try:
@@ -207,9 +231,14 @@ def create_app(cfg: DirectoryConfig | None = None) -> FastAPI:
                 security.parse_public_key(req.public_key)
             except ValueError as exc:
                 raise HTTPException(400, detail=str(exc))
+        try:
+            pinning.check_pin(req.tls_spki_sha256)
+        except ValueError as exc:
+            raise HTTPException(400, detail=str(exc))
+        require_own_key(request, req)
         if not req.url.startswith(("http://", "https://")):
             raise HTTPException(400, detail="url must be http(s)://")
-        me = Member(req.node_id, req.url.rstrip("/"), req.public_key, req.display_name)
+        me = Member(req.node_id, req.url.rstrip("/"), req.public_key, req.display_name, req.tls_spki_sha256)
         async with lock:
             latest = store.latest()
             chain = list(latest.chain) if latest else []
@@ -218,8 +247,10 @@ def create_app(cfg: DirectoryConfig | None = None) -> FastAPI:
                 if members[req.node_id] == me:  # a restart: same address, same key
                     store.log("registered", req.node_id, {"epoch": latest.epoch, "change": "none"})
                     return {"membership": latest.to_dict(), "joined": False}
+                rekeyed = members[req.node_id].tls_pin != me.tls_pin
                 members[req.node_id] = me  # only its address or key changed: no round boundary needed
-                doc, told = await issue(chain, members, f"{req.node_id} re-registered at {me.url}", None, None)
+                doc, told = await issue(chain, members, f"{req.node_id} re-registered at {me.url}"
+                                        + (" with a new TLS key" if rekeyed else ""), None, None)
                 return {"membership": doc.to_dict(), "joined": False, "told": told}
             run_id, at = await schedule(chain)
             members[req.node_id] = me

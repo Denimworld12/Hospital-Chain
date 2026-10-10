@@ -45,6 +45,12 @@ class Store:
             row = self._conn.execute("SELECT document FROM documents ORDER BY epoch DESC LIMIT 1").fetchone()
         return Membership.from_dict(json.loads(row[0])) if row else None
 
+    def recent(self, n: int) -> list[Membership]:
+        """The last n documents, newest first."""
+        with self._lock:
+            rows = self._conn.execute("SELECT document FROM documents ORDER BY epoch DESC LIMIT ?", (n,)).fetchall()
+        return [Membership.from_dict(json.loads(r[0])) for r in rows]
+
     def save(self, doc: Membership) -> None:
         with self._lock:
             self._conn.execute("INSERT INTO documents (epoch, document, created_at) VALUES (?, ?, ?)",

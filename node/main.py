@@ -11,16 +11,20 @@ Endpoints
     GET  /metrics         this node's per-round metrics for the current/last run
     GET  /membership      my current (and scheduled) membership documents, as the directory signed them
     POST /membership      take a directory-signed membership document (from the directory or a peer)
+    POST /membership/rejoin
+                          a restarted neighbour asks to rejoin from its saved chain while the directory
+                          is down; accepted only for an unchanged chain epoch and its pinned TLS key
     POST /membership/leave
                           planned departure: ask the directory to take me out of the chain at the next
                           round boundary, and tell my neighbours so they bridge to each other
     POST /assess, /assess/pdf, /assess/ecg, /assess/ecg/pdf
                           per-patient risk assessment (node/assess/routes.py)
 
-Identity comes entirely from the YAML config named by $NODE_CONFIG. With a `directory:`
-block the node registers at start (POST <directory>/register with its own credential) and
-its chain comes from the directory's signed documents; training never waits for the
-directory, so a directory outage only blocks joins and leaves.
+Identity comes from the environment and the optional YAML named by $NODE_CONFIG
+(node/settings.py). With a `directory:` block the node registers at start (POST
+<directory>/register with its own credential) and its chain comes from the directory's
+signed documents; training never waits for the directory, so a directory outage only
+blocks joins and leaves. Telemetry is pushed to the observer service (node/writer.py).
 """
 
 from __future__ import annotations
@@ -32,12 +36,13 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from pathlib import Path
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from . import discovery, security, wire
+from . import discovery, pinning, rejoin, security, wire
 from .assess.routes import Assessor, build_router as build_assess_router
 from .config import NodeConfig, load_config
 from .db import Database, NullDatabase
@@ -46,7 +51,7 @@ from .engines import build_engine, build_runner
 from .membership import Membership
 from .runner import Runner, new_run_id
 from .trainer import LocalTrainer
-from .writer import DbWriter
+from .writer import DbWriter, ObserverSink
 
 log = logging.getLogger("medchain.node")
 
@@ -58,16 +63,32 @@ class StartRequest(BaseModel):
     initiated_by: str | None = None
 
 
+class RejoinRequest(BaseModel):
+    node_id: str
+    epoch: int
+
+
 class ControlRequest(BaseModel):
     op_id: str | None = None
     origin: str | None = None
 
 
+def observer_sink(cfg: NodeConfig) -> ObserverSink:
+    timeout = httpx.Timeout(cfg.http.read_timeout_s, connect=cfg.http.connect_timeout_s)
+    if cfg.tls:  # the observer is pinned like the directory: its key comes from the kit
+        pins = [("observer", "the observer", cfg.observer.url, cfg.observer.tls_pin)]
+        client = pinning.pinned_sync_client(cfg.tls.ca, cfg.tls.cert, cfg.tls.key,
+                                            lambda host, port: pinning.pins_at(host, port, pins), timeout)
+    else:
+        client = httpx.Client(timeout=timeout)
+    return ObserverSink(cfg.observer.url, cfg.observer.token, cfg.node_id, client)
+
+
 def create_app(cfg: NodeConfig | None = None, database: Database | None = None) -> FastAPI:
     cfg = cfg or load_config()
-    if database is None:
+    if database is None:  # telemetry: the observer service; Postgres directly only without one (node/writer.py)
         dsn = os.environ.get("DATABASE_URL")
-        database = Database(dsn) if dsn else NullDatabase()
+        database = observer_sink(cfg) if cfg.observer else Database(dsn) if dsn else NullDatabase()
     trainer = LocalTrainer(
         cfg.data_slice,
         test_fraction=cfg.training.test_fraction,
@@ -77,7 +98,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
     )
     engine = build_engine(cfg, trainer)
     assessor = Assessor(cfg.assess.tabular_model, cfg.assess.ecg_model)
-    db = DbWriter(database)
+    db = DbWriter(database, audit_db=Path(cfg.state_dir) / "audit.db")
     started_at = time.time()
     state: dict = {}
     signing_key = security.load_signing_key(cfg.signing_key) if cfg.signing_key else None
@@ -85,6 +106,29 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
     if signing_key is None:
         log.warning("%s has no signing_key: /update packets are neither signed nor verified (development only)",
                     cfg.node_id)
+
+    directory_pin = cfg.directory.tls_pin if cfg.directory and cfg.tls else None
+
+    def expected_pins(host: str, port: int) -> list[pinning.Pin]:
+        """Whose key may answer at host:port: the directory (pinned by my kit) or a member of my signed chain."""
+        parties = [("directory", "the directory", cfg.directory.url, directory_pin)] if cfg.directory else []
+        if "runner" in state:
+            parties += state["runner"].known_parties()
+        return pinning.pins_at(host, port, parties)
+
+    def require_caller(request: Request, claimed: str, member, run_id: str | None = None,
+                       round_num: int | None = None) -> None:
+        """Mutual pinning: the caller's client certificate must carry the key on record for the hospital it claims."""
+        if not cfg.tls:
+            return
+        pin = pinning.Pin(claimed, (member.display_name or claimed) if member else claimed,
+                          member.tls_pin if member else None)
+        problem = pinning.caller_problem(pinning.peer_spki(request), pin)
+        if problem:
+            code, reason = problem
+            db.audit(node_id=cfg.node_id, event="tls_pin_mismatch", run_id=run_id, round_num=round_num, sender=claimed,
+                     receiver=cfg.node_id, detail={"path": request.url.path, "reason": reason})
+            raise HTTPException(code, detail=reason)
 
     async def heartbeat_loop(runner: Runner) -> None:
         while True:
@@ -105,18 +149,57 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             log.info("membership epoch %d via %s: %s", doc.epoch, via, outcome)
         return outcome
 
+    async def rejoin_from_saved(r: Runner) -> str:
+        """The directory is down: offer my saved chain to my saved neighbours (node/rejoin.py)."""
+        reason = rejoin.check_self(cfg, r.saved, r.public_key)
+        if reason:
+            attempt = rejoin.Attempt("unusable", reason=reason)
+        else:
+            attempt = await rejoin.ask_neighbours(r.client, cfg, r.saved)
+        if attempt.outcome != "unreachable":
+            db.audit(node_id=cfg.node_id, event=f"rejoin_{attempt.outcome}",
+                     detail={"epoch": attempt.epoch, "neighbours": attempt.answers, "reason": attempt.reason})
+        if attempt.outcome == "accepted":
+            log.warning("directory unreachable; my neighbours accepted my saved chain (epoch %d): rejoining",
+                        attempt.epoch)
+            docs, r.saved = r.saved, []
+            for doc in docs:
+                take_membership(doc, "saved membership, accepted by my neighbours")
+        elif attempt.outcome in ("refused", "unusable"):
+            log.warning("cannot rejoin from my saved chain (%s); waiting for the directory",
+                        attempt.reason or attempt.answers)
+            r.saved = []
+        return attempt.outcome
+
     async def register_with_directory(r: Runner) -> None:
-        """Register (retrying while the directory is unreachable), then join or rejoin the chain's run."""
-        joined, doc = False, None
+        """Register (retrying while the directory is unreachable), then join or rejoin the chain's run.
+
+        While the directory is unreachable, a restarted node may rejoin from its saved chain if its
+        neighbours vouch that the chain is unchanged; it keeps registering in the background either way.
+        A directory that answers but refuses the registration is never bypassed this way."""
+        joined, doc, rejoined = False, None, False
+        r.saved = rejoin.load(r.state_file, directory_key) if r.state_file and directory_key else []
         delay = 1.0
         while doc is None:
             try:
-                doc, joined = await discovery.register(r.client, cfg, r.public_key, trainer.n_patients)
+                doc, joined = await discovery.register(r.client, cfg, r.public_key, trainer.n_patients, r.tls_pin)
+                break
             except discovery.DirectoryError as exc:
+                if pinning.is_pin_error(exc):
+                    db.audit(node_id=cfg.node_id, event="tls_pin_mismatch", receiver="directory",
+                             detail={"reason": str(exc.__cause__ or exc)})
                 log.warning("directory registration failed (%s); retrying in %.0fs", exc, delay)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 15.0)
+                unreachable = exc.unreachable
+            if unreachable and r.saved and await rejoin_from_saved(r) == "accepted":
+                rejoined = True
+                if cfg.is_admm and r.in_chain:
+                    await r.rejoin()
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 15.0)
+        r.saved = []
         take_membership(doc, "directory registration")
+        if rejoined:
+            return
         if joined and doc.run_id and doc.effective_round and r.in_chain:
             outcome = await r.join_run(doc)
             log.info("join of run %s: %s", doc.run_id, outcome)
@@ -125,8 +208,11 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        verify = security.client_ssl_context(cfg.tls.ca) if cfg.tls else True
-        client = httpx.AsyncClient(timeout=httpx.Timeout(3.0, connect=1.5), verify=verify)
+        timeout = httpx.Timeout(cfg.http.read_timeout_s, connect=cfg.http.connect_timeout_s)
+        if cfg.tls:  # every TLS connection is pinned to the key on record for whoever we dial (node/pinning.py)
+            client = pinning.pinned_client(cfg.tls.ca, cfg.tls.cert, cfg.tls.key, expected_pins, timeout)
+        else:
+            client = httpx.AsyncClient(timeout=timeout)
         runner = build_runner(cfg, engine, db, client, signing_key=signing_key)
         state["runner"] = app.state.runner = runner
         db.start()
@@ -281,6 +367,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             db.audit(node_id=cfg.node_id, event="update_rejected", run_id=run_id, round_num=round_num, sender=sender,
                      receiver=cfg.node_id, detail={"reason": "sender is not a current or scheduled neighbour"})
             raise HTTPException(403, detail=f"{sender} is not a neighbour of {cfg.node_id}")
+        require_caller(request, sender, peer, run_id, round_num)
         body = await request.body()
         if signing_key is not None:  # who really sent this? (a checksum alone proves nothing)
             reason = None
@@ -325,13 +412,14 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         return {"accepted": True, **answer, "node_id": cfg.node_id}
 
     @app.get("/snapshot", dependencies=peer_only)
-    async def snapshot(requester: str, rejoin_round: int | None = None):
+    async def snapshot(requester: str, request: Request, rejoin_round: int | None = None):
         """A neighbour's one-off full resync: my theta_hat (plus its mirror and our edge's lambda). Never data."""
         if not cfg.is_admm:
             raise HTTPException(404, detail=f"{engine.label} keeps no theta_hat snapshot")
         r = runner()
         if r.peer(requester) is None:
             raise HTTPException(403, detail=f"{requester} is not a neighbour of {cfg.node_id}")
+        require_caller(request, requester, r.peer(requester), r.run_id, r.current_round)
         from .qgadmm.engine import snapshot_body
 
         snap = await asyncio.to_thread(engine.snapshot_for, requester)
@@ -355,7 +443,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
 
         async def go():
             try:
-                docs = await discovery.fetch_membership(runner().client, url, cfg.shared_secret)
+                docs = await discovery.fetch_membership(runner().client, url, cfg.shared_secret, cfg.node_id)
             except discovery.DirectoryError as exc:
                 log.warning("could not fetch membership from %s: %s", sender, exc)
                 return
@@ -368,8 +456,13 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         state["fetch"] = asyncio.create_task(go())
 
     @app.get("/membership", dependencies=peer_only)
-    async def membership_get():
+    async def membership_get(request: Request):
         r = runner()
+        if cfg.tls:  # a hospital asking for my documents must be one of my chain's members, with its own key
+            sender = request.headers.get(wire.H_SENDER, "")
+            if not r.member(sender):
+                raise HTTPException(403, detail=f"{sender or 'the caller'} is not a member of {cfg.node_id}'s chain")
+            require_caller(request, sender, r.member(sender))
         docs = [d for d in [r.membership, *r._pending] if d is not None and d.signature]
         return {"node_id": cfg.node_id, "epoch": r.epoch, "documents": [d.to_dict() for d in docs]}
 
@@ -381,6 +474,30 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             raise HTTPException(400, detail=str(exc))
         outcome = take_membership(doc, request.headers.get(wire.H_SENDER) or "push")
         return {"status": outcome, "node_id": cfg.node_id, "epoch": runner().known_epoch}
+
+    @app.post("/membership/rejoin", dependencies=peer_only)
+    async def membership_rejoin(req: RejoinRequest, request: Request):
+        """A restarted neighbour asks to rejoin from its saved chain while the directory is down (node/rejoin.py).
+
+        Accepted only if (a) it presents my latest epoch (the chain has not changed since it went down) and
+        (b) it connects with the TLS key the directory has on record for it."""
+        r = runner()
+        if cfg.directory is None:
+            raise HTTPException(409, detail=f"{cfg.node_id} has a static chain (no directory configured)")
+        member = r.peer(req.node_id)
+        if member is None or request.headers.get(wire.H_SENDER) != req.node_id:
+            raise HTTPException(403, detail=f"{req.node_id} is not a neighbour of {cfg.node_id} in its chain")
+        require_caller(request, req.node_id, member, r.run_id, r.current_round)
+        if req.epoch != r.known_epoch:
+            reason = (f"the chain changed while {req.node_id} was away: it presents epoch {req.epoch}, {cfg.node_id} "
+                      f"is at epoch {r.known_epoch}; wait for the directory")
+            db.audit(node_id=cfg.node_id, event="rejoin_refused", run_id=r.run_id, round_num=r.current_round,
+                     sender=req.node_id, receiver=cfg.node_id, detail={"reason": reason, "presented": req.epoch,
+                                                                        "epoch": r.known_epoch})
+            raise HTTPException(409, detail=reason)
+        db.audit(node_id=cfg.node_id, event="rejoin_accepted", run_id=r.run_id, round_num=r.current_round,
+                 sender=req.node_id, receiver=cfg.node_id, detail={"epoch": req.epoch})
+        return {"status": "accepted", "node_id": cfg.node_id, "epoch": r.known_epoch}
 
     @app.post("/membership/leave", dependencies=peer_only)
     async def membership_leave():

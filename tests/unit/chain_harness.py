@@ -15,6 +15,7 @@ node configs that take their chain from it instead of from the YAML.
 from __future__ import annotations
 
 import socket
+import ssl
 import threading
 import time
 from pathlib import Path
@@ -28,6 +29,7 @@ from node import wire
 from node.config import load_config
 from node.db import NullDatabase
 from node.main import create_app
+from node.pinning import uvicorn_config
 
 ROOT = Path(__file__).resolve().parents[2]
 SECRET = "chain-test-secret"
@@ -86,7 +88,8 @@ def write_configs(tmp: Path, chain: list[str], *, engine: str = "qgadmm", bits: 
     out = {}
     for i, node in enumerate(chain):
         neighbours = [chain[j] for j in (i - 1, i + 1) if 0 <= j < len(chain)]
-        key = (lambda m: f"    public_key: file:{pki_dir / m / 'signing.pub'}\n") if secure else (lambda m: "")
+        key = ((lambda m: f"    public_key: file:{pki_dir / m / 'signing.pub'}\n    tls_pin: file:{pki_dir / m / 'tls.crt'}\n")
+               if secure else (lambda m: ""))
         nb = "".join(f"  - id: {m}\n    url: {scheme}://127.0.0.1:{ports[m]}\n{key(m)}" for m in neighbours)
         p = tmp / f"{node}.yaml"
         p.write_text(
@@ -124,6 +127,7 @@ directory:
   url: https://127.0.0.1:{dport}
   credential_file: {pki_dir / node / 'credential'}
   public_key: file:{pki_dir / 'directory' / 'signing.pub'}
+  tls_pin: file:{pki_dir / 'directory' / 'tls.crt'}
 """ + _common(tmp, node, i, **kw) + security_yaml(pki_dir, node))
         out[node] = p
     return d, out
@@ -149,10 +153,9 @@ timing: {{heartbeat_interval_s: 5, round_timeout_s: {round_timeout_s}, round_pau
 class _Server:
     """One uvicorn server on a thread (HTTPS when given a certificate)."""
 
-    def _serve(self, app, port: int, cert: str | None = None, key: str | None = None):
-        tls = {"ssl_certfile": cert, "ssl_keyfile": key} if cert else {}
-        self.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
-                                                    lifespan="on", **tls))
+    def _serve(self, app, port: int, cert: str | None = None, key: str | None = None, ca: str | None = None):
+        self.server = uvicorn.Server(uvicorn_config(app, host="127.0.0.1", port=port, cert=cert, key=key, ca=ca,
+                                                    log_level="warning", lifespan="on"))
         self.thread = threading.Thread(target=self.server.run, daemon=True)
 
     def start(self):
@@ -176,7 +179,7 @@ class DirectoryServer(_Server):
         self.cfg = load_directory_config(config_path)
         self.app = create_directory_app(self.cfg)
         self.verify = self.cfg.ca or True
-        self._serve(self.app, self.cfg.port, self.cfg.tls_cert, self.cfg.tls_key)
+        self._serve(self.app, self.cfg.port, self.cfg.tls_cert, self.cfg.tls_key, self.cfg.ca)
 
     @property
     def url(self) -> str:
@@ -193,7 +196,7 @@ class NodeServer(_Server):
         self.db = RecordingDatabase()
         self.app = create_app(self.cfg, database=self.db)
         self.verify = self.cfg.tls.ca if self.cfg.tls else True
-        self._serve(self.app, self.cfg.port, *((self.cfg.tls.cert, self.cfg.tls.key) if self.cfg.tls else ()))
+        self._serve(self.app, self.cfg.port, *((self.cfg.tls.cert, self.cfg.tls.key, self.cfg.tls.ca) if self.cfg.tls else ()))
 
     @property
     def url(self) -> str:
@@ -215,6 +218,17 @@ class NodeServer(_Server):
 
     def post(self, path: str, **kw) -> httpx.Response:
         return httpx.post(f"{self.url}{path}", headers=AUTH, timeout=15, verify=self.verify, **kw)
+
+    def identity(self) -> ssl.SSLContext:
+        """A client context presenting this node's own certificate (to call a peer as this hospital)."""
+        return as_party(self.cfg.tls.ca, self.cfg.tls.cert, self.cfg.tls.key)
+
+
+def as_party(ca: str | Path, cert: str | Path, key: str | Path) -> ssl.SSLContext:
+    """A client TLS context that trusts the network CA and presents `cert` (a hospital's identity)."""
+    ctx = ssl.create_default_context(cafile=str(ca))
+    ctx.load_cert_chain(str(cert), str(key))
+    return ctx
 
 
 def wait_until(pred, timeout: float, what: str, interval: float = 0.05):

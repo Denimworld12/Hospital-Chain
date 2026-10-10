@@ -9,16 +9,15 @@ public key, which it learned from the directory's signed membership document (or
 for a static chain, from its own config). An unknown sender, or a signature that
 does not verify, is rejected before the packet reaches the engine.
 
-TLS encrypts the links and authenticates the server end: every node and the
-directory present a certificate issued by the network's CA (scripts/pki.py), and
-clients verify it, hostname included.
+TLS encrypts the links and authenticates both ends: every node and the directory
+present a certificate issued by the network's CA (scripts/pki.py), and the peer's
+certificate key is pinned to the one on record for that party (node/pinning.py).
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
-import ssl
 from pathlib import Path
 from typing import Mapping
 
@@ -88,7 +87,3 @@ def verify(pub: Ed25519PublicKey, signature: str | None, body: bytes, headers: M
     except (InvalidSignature, ValueError, TypeError) as exc:
         raise SignatureError("signature does not verify") from exc
 
-
-def client_ssl_context(ca_file: str | Path) -> ssl.SSLContext:
-    """Verify the server's certificate against the network CA, hostname included."""
-    return ssl.create_default_context(cafile=str(ca_file))
