@@ -175,7 +175,8 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         """Register (retrying while the directory is unreachable), then join or rejoin the chain's run.
 
         While the directory is unreachable, a restarted node may rejoin from its saved chain if its
-        neighbours vouch that the chain is unchanged; it keeps registering in the background either way."""
+        neighbours vouch that the chain is unchanged; it keeps registering in the background either way.
+        A directory that answers but refuses the registration is never bypassed this way."""
         joined, doc, rejoined = False, None, False
         r.saved = rejoin.load(r.state_file, directory_key) if r.state_file and directory_key else []
         delay = 1.0
@@ -188,7 +189,8 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
                     db.audit(node_id=cfg.node_id, event="tls_pin_mismatch", receiver="directory",
                              detail={"reason": str(exc.__cause__ or exc)})
                 log.warning("directory registration failed (%s); retrying in %.0fs", exc, delay)
-            if r.saved and await rejoin_from_saved(r) == "accepted":
+                unreachable = exc.unreachable
+            if unreachable and r.saved and await rejoin_from_saved(r) == "accepted":
                 rejoined = True
                 if cfg.is_admm and r.in_chain:
                     await r.rejoin()

@@ -14,7 +14,10 @@ from .membership import Membership
 
 
 class DirectoryError(Exception):
-    pass
+    @property
+    def unreachable(self) -> bool:
+        """True when the directory could not be reached (including a TLS pin refusal), not when it answered."""
+        return isinstance(self.__cause__, httpx.HTTPError)
 
 
 def _auth(cfg: NodeConfig) -> dict[str, str]:

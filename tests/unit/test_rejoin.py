@@ -93,3 +93,17 @@ def test_rejoin_is_refused_when_the_node_comes_back_with_another_tls_key(net):
     assert all("hospital-b's TLS key changed" in v for v in answers.values()), answers
     assert [x for x in a.db.events("tls_pin_mismatch") if x["detail"]["path"] == "/membership/rejoin"]
     assert not b.status()["in_chain"]
+
+
+def test_a_directory_that_is_up_but_refuses_the_node_is_never_bypassed(net):
+    net.up(*ABC)
+    a, c = net.nodes["hospital-a"], net.nodes["hospital-c"]
+    net.nodes["hospital-b"].stop(abrupt=True)
+    # the operator revokes b's credential while b is down; the directory stays up and answers 401
+    (net.dir_cfg.parent / "pki" / "hospital-b" / "credential").write_text("revoked\n")
+    net.nodes["hospital-b"] = b = NodeServer(net.cfgs["hospital-b"]).start()
+    wait_until(lambda: [e for e in net.directory.store.events()
+                        if e["event"] == "auth_failed" and e["node_id"] == "hospital-b"][1:], 30,
+               "b retries its registration")
+    assert not [e for n in (a, b, c) for e in n.db.audits if e["event"].startswith("rejoin_")]
+    assert not b.status()["in_chain"]

@@ -13,7 +13,9 @@ the exact commands. The directory kit runs the membership directory. Unpack, run
 `--peers` lists every hospital with the address its neighbours reach it at (a LAN IP, a
 Tailscale MagicDNS name, a domain); the order is the directory's placement order while
 no run is in progress. Every link is HTTPS: each address goes into that hospital's
-certificate, issued by the network CA kept in `--pki` (default kits/.pki). Re-running
+certificate, issued by the network CA kept in `--pki` (default kits/.pki). Nodes push
+their telemetry to the observer (`--observer`, default the directory's host on port
+8200) with its token and pin its key; no kit holds database credentials. Re-running
 with the same `--pki` reuses the CA and every existing key, so a hospital added later
 (`--hospital hospital-e`) joins the same network: copy the refreshed
 kits/directory/pki/directory/hospitals.yaml to the directory machine (it is re-read on
@@ -41,6 +43,8 @@ from node.config import ADVERTISE_URL_ENV, DIRECTORY_URL_ENV, load_config  # noq
 
 COMPOSE_FILE = "docker-compose.hospital.yaml"
 DIRECTORY = "directory"
+OBSERVER = "observer"
+OBSERVER_PORT = 8200
 DEFAULT_TEMPLATE = ROOT / "config" / "hospital-a.yaml"
 # the node image's build context, laid out as node/Dockerfile expects it (the same image runs the directory)
 SOURCE_FILES = ("node", "directory", "observer", "scripts/pki.py", "models/ecg-resnet18.onnx", "data/cardio/cardio_train.csv")
@@ -66,7 +70,7 @@ def parse_peers(spec: str) -> dict[str, str]:
         node_id, addr = node_id.strip(), addr.strip()
         if not sep or not node_id or not addr:
             raise ValueError(f"--peers entry {item!r} must look like hospital-a=host:8001")
-        if node_id in peers or node_id == DIRECTORY:
+        if node_id in peers or node_id in (DIRECTORY, OBSERVER):
             raise ValueError(f"--peers lists {node_id} twice" if node_id in peers else f"{node_id!r} is reserved")
         peers[node_id] = parse_url(node_id, addr)
     if len(peers) < 2:
@@ -91,7 +95,8 @@ def listen_port(node_id: str, url: str, template: Path) -> int:
     return int(raw["port"])
 
 
-def node_yaml(node_id: str, url: str, directory_url: str, secret: str, template: Path) -> dict:
+def node_yaml(node_id: str, url: str, directory_url: str, secret: str, template: Path,
+              observer_url: str | None) -> dict:
     raw, own = base_config(node_id, template)
     for k in ("chain", "neighbours"):
         raw.pop(k, None)
@@ -108,7 +113,18 @@ def node_yaml(node_id: str, url: str, directory_url: str, secret: str, template:
         shared_secret=secret,
         data_slice=f"/data/{node_id}.csv",
     )
+    if observer_url:
+        raw["observer"] = {"url": observer_url, "token_file": f"/pki/{OBSERVER}/token",
+                           "tls_pin": f"file:/pki/{OBSERVER}/tls.crt"}
     return raw
+
+
+def ensure_observer_token(pki_dir: Path, token: str | None) -> None:
+    """The observer's ingest token, kept with the network's keys so every kit from this network shares it."""
+    path = pki_dir / OBSERVER / "token"
+    if token or not path.is_file():
+        path.write_text((token or secrets.token_urlsafe(24)) + "\n")
+        path.chmod(0o600)
 
 
 def copy_keys(pki_dir: Path, kit: Path, party: str) -> None:
@@ -120,6 +136,10 @@ def copy_keys(pki_dir: Path, kit: Path, party: str) -> None:
     shutil.copyfile(pki_dir / DIRECTORY / "signing.pub", dst / DIRECTORY / "signing.pub")
     if party != DIRECTORY:  # the directory's certificate: this kit pins its key (out of band, not from the directory)
         shutil.copyfile(pki_dir / DIRECTORY / "tls.crt", dst / DIRECTORY / "tls.crt")
+    # the observer's certificate (pinned) and ingest token; the hub kit also gets its TLS key to run it
+    (dst / OBSERVER).mkdir()
+    for f in ("tls.crt", "token", *(("tls.key",) if party == DIRECTORY else ())):
+        shutil.copyfile(pki_dir / OBSERVER / f, dst / OBSERVER / f)
 
 
 def compose_yaml(name: str, port: int, *, image: str | None, env: dict, volumes: list[str], bind_ip: str | None,
@@ -158,13 +178,15 @@ def fresh(out: Path, name: str, force: bool) -> Path:
 
 
 def kit_readme(node_id: str, display: str, url: str, directory_url: str, port: int, secret: str, *,
-               image: str | None, observer_db: str | None) -> str:
+               image: str | None, observer_url: str | None, observer_db: str | None) -> str:
     up = f"docker compose -f {COMPOSE_FILE} up -d{'' if image else ' --build'} --wait"
     observer = (f"Training telemetry goes to the observer database at `{observer_db}` (read by the\n"
                 "MedChain dashboard). It only observes; training does not depend on it."
                 if observer_db else
-                "No observer database is configured, so this node keeps its telemetry to itself\n"
-                "(`/status` and `/metrics` still work). Re-provision with `--observer-db` to feed a dashboard.")
+                f"Training telemetry is pushed to the observer at `{observer_url}` over HTTPS with\n"
+                f"its token (`pki/{OBSERVER}/token`), pinned to its key (`pki/{OBSERVER}/tls.crt`); the\n"
+                "MedChain dashboard reads it from there. This node never holds database credentials,\n"
+                "and training never waits for the observer.")
     curl = f"curl --cacert pki/ca.crt https://localhost:{port}"
     return textwrap.dedent("""\
         # MedChain node kit: {display} (`{node_id}`)
@@ -266,12 +288,12 @@ def kit_readme(node_id: str, display: str, url: str, directory_url: str, port: i
 
 
 def build_kit(node_id: str, url: str, out: Path, *, directory_url: str, pki_dir: Path, secret: str, data: Path,
-              template: Path, image: str | None, observer_db: str | None, bind_ip: str | None, make_zip: bool,
-              force: bool) -> Path:
+              template: Path, image: str | None, observer_url: str, observer_db: str | None, bind_ip: str | None,
+              make_zip: bool, force: bool) -> Path:
     kit = fresh(out, node_id, force)
     (kit / "config").mkdir()
     (kit / "data").mkdir()
-    cfg = node_yaml(node_id, url, directory_url, secret, template)
+    cfg = node_yaml(node_id, url, directory_url, secret, template, None if observer_db else observer_url)
     cfg_path = kit / "config" / f"{node_id}.yaml"
     cfg_path.write_text(f"# MedChain node config for {node_id}, generated by scripts/provision.py.\n"
                         + yaml.safe_dump(cfg, sort_keys=False))
@@ -289,7 +311,7 @@ def build_kit(node_id: str, url: str, out: Path, *, directory_url: str, pki_dir:
         f"# Runs only {node_id}. See README.md:  docker compose -f {COMPOSE_FILE} up -d{'' if image else ' --build'} --wait\n"
         + yaml.safe_dump(compose, sort_keys=False))
     (kit / "README.md").write_text(kit_readme(node_id, str(cfg["display_name"]), url, directory_url, port, secret,
-                                              image=image, observer_db=observer_db))
+                                              image=image, observer_url=observer_url, observer_db=observer_db))
     if not image:
         copy_source(kit)
     if make_zip:
@@ -297,8 +319,8 @@ def build_kit(node_id: str, url: str, out: Path, *, directory_url: str, pki_dir:
     return kit
 
 
-def build_directory_kit(url: str, out: Path, *, pki_dir: Path, image: str | None, bind_ip: str | None,
-                        make_zip: bool, force: bool) -> Path:
+def build_directory_kit(url: str, out: Path, *, pki_dir: Path, observer_url: str, image: str | None,
+                        bind_ip: str | None, make_zip: bool, force: bool) -> Path:
     kit = fresh(out, DIRECTORY, force)
     (kit / "config").mkdir()
     port = urlsplit(url).port or 8100
@@ -332,6 +354,23 @@ def build_directory_kit(url: str, out: Path, *, pki_dir: Path, image: str | None
         credential, in placement order). It is re-read on every registration: to admit
         a new hospital, replace it with the refreshed file from the provisioning machine.
         Keep `pki/directory/signing.key` private: it signs every membership document.
+
+        ## The observer
+
+        The hospitals push their telemetry to the observer at `{observer_url}`, which
+        writes it to the dashboard's Postgres. This kit holds its TLS certificate and key
+        (`pki/observer/`, which the hospitals pin) and its ingest token
+        (`pki/observer/token`, also in every hospital kit). Run it on this machine next
+        to Postgres, from the node image or `source/`:
+
+        ```sh
+        OBSERVER_PORT={urlsplit(observer_url).port or OBSERVER_PORT} OBSERVER_TOKEN_FILE=pki/observer/token \\
+          TLS_CERT=pki/observer/tls.crt TLS_KEY=pki/observer/tls.key TLS_CA=pki/ca.crt \\
+          DATABASE_URL=postgresql://medchain:medchain@127.0.0.1:5432/medchain \\
+          PYTHONPATH=source python -m observer
+        ```
+
+        Keep `pki/observer/tls.key` private. Training never waits for the observer.
         """))
     if not image:
         copy_source(kit)
@@ -355,7 +394,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE,
                     help="engine settings for a hospital without its own config/<id>.yaml")
     ap.add_argument("--image", help="use this prebuilt node image instead of bundling the build context")
-    ap.add_argument("--observer-db", help="postgresql:// URL of the dashboard's database (optional, observe-only)")
+    ap.add_argument("--observer", help="the observer's address, host:port (https; default: the directory's host, "
+                                       f"port {OBSERVER_PORT})")
+    ap.add_argument("--observer-token", help="the observer's ingest token (default: the network's, else a new one)")
+    ap.add_argument("--observer-db", help="fallback: postgresql:// URL the nodes write to directly instead of the observer")
     ap.add_argument("--bind-ip", help="publish the port on this host IP only (e.g. the machine's Tailscale IP)")
     ap.add_argument("--zip", action="store_true", help="also write <out>/<id>.zip for each kit")
     ap.add_argument("--force", action="store_true", help="replace kits that already exist")
@@ -364,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         peers = parse_peers(args.peers)
         directory_url = parse_url(DIRECTORY, args.directory)
+        observer_url = parse_url(OBSERVER, args.observer or f"{urlsplit(directory_url).hostname}:{OBSERVER_PORT}")
         wanted = args.hospital or [*peers, DIRECTORY]
         unknown = [h for h in wanted if h not in peers and h != DIRECTORY]
         if unknown:
@@ -382,15 +425,19 @@ def main(argv: list[str] | None = None) -> int:
             listen_port(h, peers[h], args.template)
         pki_dir = args.pki or args.out / ".pki"
         host = lambda u: [urlsplit(u).hostname, "localhost", "127.0.0.1"]  # noqa: E731 - + local checks
-        pki.issue(pki_dir, (DIRECTORY, host(directory_url)), [(h, host(u)) for h, u in peers.items()])
+        pki.issue(pki_dir, (DIRECTORY, host(directory_url)), [(h, host(u)) for h, u in peers.items()],
+                  [(OBSERVER, host(observer_url))])
+        ensure_observer_token(pki_dir, args.observer_token)
         secret = args.secret or secrets.token_urlsafe(24)
         for h in hospitals:
             kit = build_kit(h, peers[h], args.out, directory_url=directory_url, pki_dir=pki_dir, secret=secret,
-                            data=data[h], template=args.template, image=args.image, observer_db=args.observer_db,
+                            data=data[h], template=args.template, image=args.image, observer_url=observer_url,
+                            observer_db=args.observer_db,
                             bind_ip=args.bind_ip, make_zip=args.zip, force=args.force)
             print(f"{h}: {kit}{' (+ ' + kit.name + '.zip)' if args.zip else ''}")
         if DIRECTORY in wanted:
-            kit = build_directory_kit(directory_url, args.out, pki_dir=pki_dir, image=args.image,
+            kit = build_directory_kit(directory_url, args.out, pki_dir=pki_dir, observer_url=observer_url,
+                                      image=args.image,
                                       bind_ip=args.bind_ip, make_zip=args.zip, force=args.force)
             print(f"{DIRECTORY}: {kit}{' (+ directory.zip)' if args.zip else ''}")
         else:

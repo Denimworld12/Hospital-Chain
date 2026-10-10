@@ -534,8 +534,8 @@ and `IMAGE_VERSION`. The keys and secrets come in as `TLS_CERT`, `TLS_KEY`,
 in batches, with its token. Each node keeps a bounded queue that drops the
 oldest writes when full and is never awaited by a round. Each node also keeps
 its own copy of every audit event in `DATA_PATH/audit.db` (SQLite). The
-single-machine stack uses this same path. Kits from `scripts/provision.py`
-still use `--observer-db` until they are adapted to it.
+single-machine stack and the kits from `scripts/provision.py` use this same
+path.
 
 **Preflight.** On each machine, `python scripts/preflight.py --node
 https://localhost:<port> --ca pki/ca.crt` lists the node's neighbours and
@@ -563,7 +563,7 @@ directory:
 python scripts/provision.py --zip \
   --peers hospital-a=hospital-a.tail1234.ts.net:8001,hospital-b=hospital-b.tail1234.ts.net:8002,hospital-c=hospital-c.tail1234.ts.net:8003,hospital-d=hospital-d.tail1234.ts.net:8004 \
   --directory directory.tail1234.ts.net:8100 \
-  --observer-db postgresql://medchain:medchain@observer.tail1234.ts.net:5432/medchain   # optional
+  --observer directory.tail1234.ts.net:8200   # optional: this is the default (the directory's host)
 ```
 
 `--peers` lists every hospital with the address the others reach it at: a LAN
@@ -574,15 +574,17 @@ and `kits/directory/`, plus a `.zip` of each. The network's CA and keys live in
 `kits/.pki/` (or `--pki DIR`) and are reused on every later run, so the network
 is never re-keyed. Every hospital kit holds:
 
-- `config/hospital-X.yaml`: its own address, the directory's address, and one
-  freshly generated shared secret (the same for every kit from the same run; pass
+- `config/hospital-X.yaml`: its own address, the directory's address, the
+  observer's address, and one freshly generated shared secret (the same for every kit from the same run; pass
   it with `--secret` to provision a hospital later). There is no chain in it: the
   directory places the hospital. Engine settings come from the repository's
   `config/hospital-X.yaml`.
 - `pki/`: only this hospital's own TLS certificate and key (issued for its
   address), its update-signing key and its directory credential, plus the CA
   certificate, the directory's public key and the directory's certificate (whose
-  key the node pins). No other party's private key.
+  key the node pins), and the observer's certificate (also pinned) and ingest
+  token (`pki/observer/token`). No other party's private key, and no database
+  credentials.
 - `docker-compose.hospital.yaml`, which runs only that node.
 - `data/hospital-X.csv`, that hospital's slice. Pass `--data hospital-X=path.csv`
   to use different data.
@@ -592,7 +594,8 @@ is never re-keyed. Every hospital kit holds:
 
 The directory kit holds the directory's config, its TLS certificate, its
 document-signing key and `hospitals.yaml` (who may register: ids and credential
-hashes only). Send each kit privately to its operator. Start the directory, then
+hashes only), plus the observer's TLS certificate, key and token so the hub can
+run the observer (its README has the command). Send each kit privately to its operator. Start the directory, then
 each hospital, each with one command:
 
 ```sh
@@ -645,8 +648,10 @@ machine:
 MEDCHAIN_SHARED_SECRET=<kit secret> NODE_EXTRA_CA_CERTS=kits/.pki/ca.crt docker compose up -d postgres dashboard
 ```
 
-Nodes write telemetry to it only when their kit was provisioned with
-`--observer-db`. It never coordinates training. A node with no observer still
+Kit nodes push their telemetry to the observer (`--observer`, by default the
+directory's host on port 8200), which the hub runs next to Postgres from the
+directory kit; `--observer-db` instead points the nodes straight at a Postgres
+URL, as a fallback. It never coordinates training. A node with no observer still
 trains and still serves `/status` and `/metrics`.
 
 ### Prove it

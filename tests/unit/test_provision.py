@@ -33,12 +33,12 @@ def sans(crt: Path) -> set[str]:
 
 
 def test_kit_has_every_file_with_the_real_addresses_and_only_its_own_keys(tmp_path):
-    assert run(tmp_path, "--hospital", "hospital-b", "--zip",
-               "--observer-db", "postgresql://medchain:medchain@100.101.1.99:5432/medchain") == 0
+    assert run(tmp_path, "--hospital", "hospital-b", "--zip") == 0
     kit = tmp_path / "hospital-b"
     for rel in ("README.md", "docker-compose.hospital.yaml", "config/hospital-b.yaml", "data/hospital-b.csv",
                 "pki/ca.crt", "pki/directory/signing.pub", "pki/hospital-b/tls.crt", "pki/hospital-b/tls.key",
                 "pki/hospital-b/signing.key", "pki/hospital-b/credential",
+                "pki/observer/tls.crt", "pki/observer/token",
                 "source/node/Dockerfile", "source/node/requirements.txt", "source/node/__main__.py",
                 "source/directory/app.py", "source/scripts/pki.py",
                 "source/models/ecg-resnet18.onnx", "source/data/cardio/cardio_train.csv"):
@@ -46,9 +46,11 @@ def test_kit_has_every_file_with_the_real_addresses_and_only_its_own_keys(tmp_pa
     assert not list(kit.rglob("__pycache__"))
     assert not (tmp_path / "hospital-a").exists() and not (tmp_path / "directory").exists()
     # no other party's private key, and not the CA key or the directory's signing key
-    assert sorted(p.name for p in (kit / "pki").iterdir()) == ["ca.crt", "directory", "hospital-b"]
+    assert sorted(p.name for p in (kit / "pki").iterdir()) == ["ca.crt", "directory", "hospital-b", "observer"]
     # the directory's public halves only: its document key, and its certificate (this kit pins its TLS key)
     assert sorted(p.name for p in (kit / "pki" / "directory").iterdir()) == ["signing.pub", "tls.crt"]
+    # the observer's certificate (pinned) and its ingest token, not its private key
+    assert sorted(p.name for p in (kit / "pki" / "observer").iterdir()) == ["tls.crt", "token"]
     assert (kit / "data" / "hospital-b.csv").read_bytes() == (ROOT / "data/slices/hospital-b.csv").read_bytes()
 
     cfg = load_config(kit / "config" / "hospital-b.yaml")
@@ -61,6 +63,11 @@ def test_kit_has_every_file_with_the_real_addresses_and_only_its_own_keys(tmp_pa
     assert cfg.directory.tls_pin_ref == "file:/pki/directory/tls.crt"
     assert cfg.tls.ca == "/pki/ca.crt" and cfg.signing_key == "/pki/hospital-b/signing.key"
     assert cfg.shared_secret == SECRET and cfg.data_slice == "/data/hospital-b.csv"
+    # telemetry is pushed to the observer on the hub (the directory's host by default), pinned, with its token
+    assert cfg.observer.url == "https://100.101.1.99:8200"
+    assert cfg.observer.token_ref == "file:/pki/observer/token"
+    assert cfg.observer.tls_pin_ref == "file:/pki/observer/tls.crt"
+    assert {"100.101.1.99", "localhost"} <= sans(kit / "pki/observer/tls.crt")
     repo = load_config(ROOT / "config" / "hospital-b.yaml")
     assert (cfg.engine, cfg.rho, cfg.bits, cfg.training, cfg.timing) == (
         repo.engine, repo.rho, repo.bits, repo.training, repo.timing)
@@ -73,15 +80,15 @@ def test_kit_has_every_file_with_the_real_addresses_and_only_its_own_keys(tmp_pa
     svc = compose["services"]["hospital-b"]
     assert list(compose["services"]) == ["hospital-b"]
     assert svc["build"] == {"context": "./source", "dockerfile": "node/Dockerfile"} and svc["ports"] == ["8002:8002"]
-    assert svc["environment"] == {"NODE_CONFIG": "/config/hospital-b.yaml",
-                                  "DATABASE_URL": "postgresql://medchain:medchain@100.101.1.99:5432/medchain"}
+    assert svc["environment"] == {"NODE_CONFIG": "/config/hospital-b.yaml"}, "no database credentials"
     assert {"./config/hospital-b.yaml:/config/hospital-b.yaml:ro", "./data/hospital-b.csv:/data/hospital-b.csv:ro",
             "./pki:/pki:ro"} <= set(svc["volumes"])
 
     readme = (kit / "README.md").read_text()
     assert "docker compose -f docker-compose.hospital.yaml up -d --build --wait" in readme
     assert "python -m node.leave" in readme and "MEDCHAIN_DIRECTORY_URL" in readme
-    for text in ("https://hospital-b.tail1234.ts.net:8002", "https://100.101.1.99:8100", SECRET):
+    for text in ("https://hospital-b.tail1234.ts.net:8002", "https://100.101.1.99:8100", "https://100.101.1.99:8200",
+                 SECRET):
         assert text in readme
     with zipfile.ZipFile(tmp_path / "hospital-b.zip") as z:
         assert {"hospital-b/README.md", "hospital-b/pki/hospital-b/signing.key"} <= set(z.namelist())
@@ -114,6 +121,32 @@ def test_one_run_provisions_every_hospital_and_the_directory(tmp_path):
     assert svc["image"] == "registry.example/medchain-node:1" and "build" not in svc
     assert svc["ports"] == ["100.101.1.10:8001:8001"] and "DATABASE_URL" not in svc["environment"]
     assert not (tmp_path / "hospital-a" / "source").exists(), "--image ships no build context"
+    # every kit shares one observer token and pins one observer key; only the hub kit can run the observer
+    tokens = {(tmp_path / n / "pki/observer/token").read_text() for n in [*ids, "directory"]}
+    assert len(tokens) == 1 and tokens != {""}
+    assert len({(tmp_path / n / "pki/observer/tls.crt").read_bytes() for n in [*ids, "directory"]}) == 1
+    assert (d / "pki/observer/tls.key").is_file() and not (tmp_path / "hospital-a" / "pki/observer/tls.key").exists()
+
+
+def test_observer_address_and_token_flags_and_the_database_fallback(tmp_path):
+    assert run(tmp_path, "--hospital", "hospital-a", "--image", "x", "--observer", "hub.tail1234.ts.net:9200",
+               "--observer-token", "tok-1") == 0
+    kit = tmp_path / "hospital-a"
+    cfg = load_config(kit / "config" / "hospital-a.yaml")
+    assert cfg.observer.url == "https://hub.tail1234.ts.net:9200"
+    assert (kit / "pki/observer/token").read_text().strip() == "tok-1"
+    assert "hub.tail1234.ts.net" in sans(kit / "pki/observer/tls.crt")
+    # the token is kept with the network: a later run without --observer-token reuses it
+    assert run(tmp_path / "again", "--hospital", "hospital-b", "--image", "x", "--pki", str(tmp_path / ".pki")) == 0
+    assert (tmp_path / "again/hospital-b/pki/observer/token").read_text().strip() == "tok-1"
+    # --observer-db is an explicit fallback: the node writes Postgres directly instead of pushing
+    dsn = "postgresql://medchain:medchain@127.0.0.1:5432/medchain"
+    assert run(tmp_path / "db", "--hospital", "hospital-a", "--image", "x", "--observer-db", dsn) == 0
+    assert load_config(tmp_path / "db/hospital-a/config/hospital-a.yaml").observer is None
+    svc = yaml.safe_load((tmp_path / "db/hospital-a/docker-compose.hospital.yaml").read_text())["services"]["hospital-a"]
+    assert svc["environment"]["DATABASE_URL"] == dsn
+    assert provision.main(["--peers", PEERS, "--directory", DIRECTORY, "--observer", "http://hub:8200",
+                           "--out", str(tmp_path / "bad"), "--image", "x"]) == 2
 
 
 def test_adding_a_hospital_later_reuses_the_network_and_admits_it(tmp_path):
