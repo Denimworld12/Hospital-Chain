@@ -102,7 +102,7 @@ def node_yaml(node_id: str, url: str, directory_url: str, secret: str, template:
         host="0.0.0.0",
         advertise_url=url,
         directory={"url": directory_url, "credential_file": f"/pki/{node_id}/credential",
-                   "public_key": "file:/pki/directory/signing.pub"},
+                   "public_key": "file:/pki/directory/signing.pub", "tls_pin": "file:/pki/directory/tls.crt"},
         tls={"cert": f"/pki/{node_id}/tls.crt", "key": f"/pki/{node_id}/tls.key", "ca": "/pki/ca.crt"},
         signing_key=f"/pki/{node_id}/signing.key",
         shared_secret=secret,
@@ -118,6 +118,8 @@ def copy_keys(pki_dir: Path, kit: Path, party: str) -> None:
     shutil.copyfile(pki_dir / "ca.crt", dst / "ca.crt")
     (dst / DIRECTORY).mkdir(exist_ok=True)
     shutil.copyfile(pki_dir / DIRECTORY / "signing.pub", dst / DIRECTORY / "signing.pub")
+    if party != DIRECTORY:  # the directory's certificate: this kit pins its key (out of band, not from the directory)
+        shutil.copyfile(pki_dir / DIRECTORY / "tls.crt", dst / DIRECTORY / "tls.crt")
 
 
 def compose_yaml(name: str, port: int, *, image: str | None, env: dict, volumes: list[str], bind_ip: str | None,
@@ -190,7 +192,7 @@ def kit_readme(node_id: str, display: str, url: str, directory_url: str, port: i
         - Port {port} free on this machine, and reachable at `{url}` from the other
           hospitals and the directory. The simplest way is a private mesh network such as
           Tailscale on every machine: it works through NAT and needs no port forwarding.
-          The node's TLS certificate is issued for exactly that address.
+          Peers pin this node's TLS key (registered with the directory), not its address.
         - To train on your own patients instead of the demo slice, replace
           `data/{node_id}.csv` with a file that has the same columns.
 
@@ -254,9 +256,10 @@ def kit_readme(node_id: str, display: str, url: str, directory_url: str, port: i
         ```
 
         Then run the `up` command again; the node re-registers its new address and the
-        directory passes it to its neighbours. A new address also needs a certificate
-        issued for it: ask whoever provisioned the network to re-run
-        `scripts/provision.py` for this hospital with the new address.
+        directory passes it to its neighbours. Other hospitals pin this node's TLS key,
+        not its address, so their links keep working. Only the dashboard checks the
+        address: for it, ask whoever provisioned the network to re-run
+        `scripts/provision.py` for this hospital with the new address (same key).
         """).format(display=display, node_id=node_id, url=url, directory_url=directory_url, port=port, up=up,
                     curl=curl, secret=secret, observer=observer, ADVERTISE=ADVERTISE_URL_ENV,
                     DIRECTORY_ENV=DIRECTORY_URL_ENV, COMPOSE_FILE=COMPOSE_FILE)

@@ -18,8 +18,12 @@ Membership comes from one of two places:
                 `chain`/`neighbours` are then left out.
 
 Security (both optional for local development; the shipped compose stack and the
-provisioning kits always set them): `tls:` (cert, key, ca) serves HTTPS and verifies
-peers against the network CA, and `signing_key:` is this node's Ed25519 key. A node
+provisioning kits always set them): `tls:` (cert, key, ca) serves HTTPS, verifies
+peers' certificates against the network CA and pins each peer's key
+(node/pinning.py): the directory block then needs `tls_pin` (the directory's key,
+from the kit) and each static neighbour a `tls_pin`; with a directory, the other
+hospitals' pins come from its signed membership documents. `signing_key:` is this
+node's Ed25519 key. A node
 with a signing key signs every /update and /snapshot it sends and rejects any update
 whose sender it has no public key for, or whose signature does not verify.
 
@@ -46,6 +50,7 @@ class Neighbour:
     id: str
     url: str
     public_key: str | None = None  # base64 Ed25519 key that verifies this neighbour's signatures
+    tls_pin: str | None = None  # SHA-256 of its TLS certificate key (node/pinning.py); required with TLS
 
 
 @dataclass(frozen=True)
@@ -60,6 +65,7 @@ class DirectoryConfig:
     url: str
     credential_ref: str  # this hospital's pre-shared registration credential, inline or `file:<path>`
     public_key_ref: str  # base64 Ed25519 key that verifies the directory's documents, inline or `file:<path>`
+    tls_pin_ref: str | None = None  # the directory's TLS key pin, `sha256:<hex>` or `file:<its tls.crt>` (from the kit)
 
     # read when used, not when the config loads, so a config can be inspected away from its key files
     @property
@@ -70,6 +76,12 @@ class DirectoryConfig:
     @property
     def public_key(self) -> str:
         return _read_key(None, self.public_key_ref)
+
+    @property
+    def tls_pin(self) -> str | None:
+        from .pinning import parse_pin
+
+        return parse_pin(self.tls_pin_ref) if self.tls_pin_ref else None
 
 
 @dataclass(frozen=True)
@@ -162,7 +174,8 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
         raise ValueError(f"{path}: missing required keys {missing}")
     neighbours = tuple(
         Neighbour(id=str(n["id"]), url=_env_url(path, peer_url_env(str(n["id"])), str(n["url"])),
-                  public_key=_read_key(path, n.get("public_key")))
+                  public_key=_read_key(path, n.get("public_key")),
+                  tls_pin=_read_pin(path, n.get("tls_pin")))
         for n in raw.get("neighbours") or []
     )
     if any(n.id == raw["node_id"] for n in neighbours):
@@ -181,6 +194,14 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
     if engine in ADMM_ENGINES and not directory:
         _check_chain(path, str(raw["node_id"]), chain, neighbours)
     tls = TlsConfig(**{k: str(v) for k, v in raw["tls"].items()}) if raw.get("tls") else None
+    if tls:  # peers are identified by their pinned TLS key, not by the address they are dialled at
+        unpinned = [n.id for n in neighbours if not n.tls_pin]
+        if unpinned:
+            raise ValueError(f"{path}: with `tls:` every neighbour needs a `tls_pin` (sha256:<hex> or "
+                             f"file:<its tls.crt>); missing for {unpinned}")
+        if directory and not directory.tls_pin_ref:
+            raise ValueError(f"{path}: with `tls:` the directory block needs `tls_pin` (the directory's key pin "
+                             "from this hospital's kit, e.g. file:/pki/directory/tls.crt)")
     advertise_url = _env_url(path, ADVERTISE_URL_ENV, str(raw.get("advertise_url", f"{'https' if tls else 'http'}://{raw['node_id']}:{port}")))
     scheme = "https" if tls else "http"
     for url in [advertise_url, *(n.url for n in neighbours), *([directory.url] if directory else [])]:
@@ -227,6 +248,17 @@ def _read_key(path, value) -> str | None:
     return value
 
 
+def _read_pin(path, value) -> str | None:
+    if not value:
+        return None
+    from .pinning import parse_pin
+
+    try:
+        return parse_pin(str(value))
+    except (ValueError, OSError) as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+
+
 def _directory(path, raw) -> DirectoryConfig | None:
     if not raw:
         return None
@@ -237,7 +269,8 @@ def _directory(path, raw) -> DirectoryConfig | None:
         raise ValueError(f"{path}: directory needs {missing}")
     credential = str(raw["credential"]) if raw.get("credential") else f"file:{raw['credential_file']}"
     return DirectoryConfig(url=_env_url(path, DIRECTORY_URL_ENV, str(raw["url"])), credential_ref=credential,
-                           public_key_ref=str(raw["public_key"]))
+                           public_key_ref=str(raw["public_key"]),
+                           tls_pin_ref=str(raw["tls_pin"]) if raw.get("tls_pin") else None)
 
 
 def _env_url(path, var: str, configured: str) -> str:

@@ -15,6 +15,7 @@ directory:
   url: https://directory:8100
   credential_file: /pki/hospital-b/credential
   public_key: file:/pki/directory/signing.pub
+  tls_pin: file:/pki/directory/tls.crt  # the directory's TLS key, from this kit (never asked of the directory)
 
 # TLS on every node-to-node link (certificates from the network CA, scripts/pki.py),
 # and the Ed25519 key that signs every /update this node sends. Receivers verify the

@@ -1,8 +1,8 @@
 """Chain membership documents: who is in the chain, in which order, from which round.
 
 A `Membership` is one epoch of the chain: the ordered node ids (positions 1..N; odd =
-HEAD group, even = TAIL group), each member's address and update-signing public key,
-and the round boundary at which it takes effect. The directory service
+HEAD group, even = TAIL group), each member's address, update-signing public key
+and TLS key pin (node/pinning.py), and the round boundary at which it takes effect. The directory service
 (directory/) issues them, signed with its Ed25519 key, whenever a hospital joins or
 leaves; a node accepts a document from anyone (the directory, a neighbour, the
 leaving hospital) as long as the directory's signature verifies, so a membership
@@ -30,6 +30,7 @@ class Member:
     url: str
     public_key: str | None = None  # base64 Ed25519 key that verifies this member's /update signatures
     display_name: str | None = None
+    tls_pin: str | None = None  # SHA-256 of this member's TLS certificate key (node/pinning.py), as it registered it
 
 
 @dataclass(frozen=True)
@@ -70,8 +71,7 @@ class Membership:
         out = {
             "epoch": self.epoch,
             "chain": list(self.chain),
-            "members": {k: {"url": m.url, "public_key": m.public_key, "display_name": m.display_name}
-                        for k, m in sorted(self.members.items())},
+            "members": {k: _member_dict(m) for k, m in sorted(self.members.items())},
             "effective_round": self.effective_round,
             "run_id": self.run_id,
             "reason": self.reason,
@@ -88,7 +88,7 @@ class Membership:
     def from_dict(cls, raw: Mapping) -> "Membership":
         try:
             members = {str(k): Member(id=str(k), url=str(v["url"]).rstrip("/"), public_key=v.get("public_key"),
-                                      display_name=v.get("display_name"))
+                                      display_name=v.get("display_name"), tls_pin=v.get("tls_pin"))
                        for k, v in (raw.get("members") or {}).items()}
             eff = raw.get("effective_round")
             return cls(epoch=int(raw["epoch"]), chain=tuple(str(c) for c in raw["chain"]), members=members,
@@ -103,6 +103,13 @@ class Membership:
     def verify(self, directory_key) -> None:
         """Raise security.SignatureError unless the directory signed exactly this document."""
         security.verify(directory_key, self.signature, self.canonical(), {}, "membership")
+
+
+def _member_dict(m: Member) -> dict:
+    out = {"url": m.url, "public_key": m.public_key, "display_name": m.display_name}
+    if m.tls_pin is not None:  # only when set, so documents signed before pinning keep their canonical bytes
+        out["tls_pin"] = m.tls_pin
+    return out
 
 
 def link_key(a: str, b: str) -> str:

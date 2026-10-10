@@ -25,7 +25,7 @@ async def _call(client: httpx.AsyncClient, method: str, url: str, **kw) -> dict:
     try:
         resp = await client.request(method, url, **kw)
     except httpx.HTTPError as exc:
-        raise DirectoryError(f"{url} unreachable ({type(exc).__name__})") from exc
+        raise DirectoryError(f"{url} unreachable ({type(exc).__name__}: {exc})") from exc
     if resp.status_code != 200:
         try:
             detail = resp.json().get("detail", resp.text)
@@ -36,11 +36,15 @@ async def _call(client: httpx.AsyncClient, method: str, url: str, **kw) -> dict:
 
 
 async def register(client: httpx.AsyncClient, cfg: NodeConfig, public_key: str | None,
-                   patients: int) -> tuple[Membership, bool]:
-    """Returns (the membership document that places me, whether this registration added me to the chain)."""
+                   patients: int, tls_pin: str | None = None) -> tuple[Membership, bool]:
+    """Returns (the membership document that places me, whether this registration added me to the chain).
+
+    `tls_pin` is my TLS certificate's key pin: the directory records it for my id (this call is authenticated
+    with my kit credential, and made over a connection that presents that certificate) and publishes it in
+    the signed documents, which is how the other hospitals know which key is really me."""
     out = await _call(client, "POST", f"{cfg.directory.url}/register", headers=_auth(cfg),
                       json={"node_id": cfg.node_id, "url": cfg.advertise_url, "public_key": public_key,
-                            "display_name": cfg.display_name, "patients": patients})
+                            "display_name": cfg.display_name, "patients": patients, "tls_spki_sha256": tls_pin})
     return Membership.from_dict(out["membership"]), bool(out.get("joined"))
 
 
@@ -49,8 +53,8 @@ async def leave(client: httpx.AsyncClient, cfg: NodeConfig) -> Membership:
     return Membership.from_dict(out["membership"])
 
 
-async def fetch_membership(client: httpx.AsyncClient, peer_url: str, secret: str) -> list[Membership]:
-    out = await _call(client, "GET", f"{peer_url}/membership", headers={wire.H_SECRET: secret})
+async def fetch_membership(client: httpx.AsyncClient, peer_url: str, secret: str, sender: str) -> list[Membership]:
+    out = await _call(client, "GET", f"{peer_url}/membership", headers={wire.H_SECRET: secret, wire.H_SENDER: sender})
     return [Membership.from_dict(d) for d in out.get("documents") or []]
 
 

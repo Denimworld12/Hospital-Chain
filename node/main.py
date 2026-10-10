@@ -37,7 +37,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from . import discovery, security, wire
+from . import discovery, pinning, security, wire
 from .assess.routes import Assessor, build_router as build_assess_router
 from .config import NodeConfig, load_config
 from .db import Database, NullDatabase
@@ -86,6 +86,29 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         log.warning("%s has no signing_key: /update packets are neither signed nor verified (development only)",
                     cfg.node_id)
 
+    directory_pin = cfg.directory.tls_pin if cfg.directory and cfg.tls else None
+
+    def expected_pins(host: str, port: int) -> list[pinning.Pin]:
+        """Whose key may answer at host:port: the directory (pinned by my kit) or a member of my signed chain."""
+        parties = [("directory", "the directory", cfg.directory.url, directory_pin)] if cfg.directory else []
+        if "runner" in state:
+            parties += state["runner"].known_parties()
+        return pinning.pins_at(host, port, parties)
+
+    def require_caller(request: Request, claimed: str, member, run_id: str | None = None,
+                       round_num: int | None = None) -> None:
+        """Mutual pinning: the caller's client certificate must carry the key on record for the hospital it claims."""
+        if not cfg.tls:
+            return
+        pin = pinning.Pin(claimed, (member.display_name or claimed) if member else claimed,
+                          member.tls_pin if member else None)
+        problem = pinning.caller_problem(pinning.peer_spki(request), pin)
+        if problem:
+            code, reason = problem
+            db.audit(node_id=cfg.node_id, event="tls_pin_mismatch", run_id=run_id, round_num=round_num, sender=claimed,
+                     receiver=cfg.node_id, detail={"path": request.url.path, "reason": reason})
+            raise HTTPException(code, detail=reason)
+
     async def heartbeat_loop(runner: Runner) -> None:
         while True:
             db.heartbeat(cfg.node_id, runner.run_id, runner.state, runner.current_round)
@@ -111,8 +134,11 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         delay = 1.0
         while doc is None:
             try:
-                doc, joined = await discovery.register(r.client, cfg, r.public_key, trainer.n_patients)
+                doc, joined = await discovery.register(r.client, cfg, r.public_key, trainer.n_patients, r.tls_pin)
             except discovery.DirectoryError as exc:
+                if pinning.is_pin_error(exc):
+                    db.audit(node_id=cfg.node_id, event="tls_pin_mismatch", receiver="directory",
+                             detail={"reason": str(exc.__cause__ or exc)})
                 log.warning("directory registration failed (%s); retrying in %.0fs", exc, delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 15.0)
@@ -125,8 +151,11 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        verify = security.client_ssl_context(cfg.tls.ca) if cfg.tls else True
-        client = httpx.AsyncClient(timeout=httpx.Timeout(3.0, connect=1.5), verify=verify)
+        timeout = httpx.Timeout(3.0, connect=1.5)
+        if cfg.tls:  # every TLS connection is pinned to the key on record for whoever we dial (node/pinning.py)
+            client = pinning.pinned_client(cfg.tls.ca, cfg.tls.cert, cfg.tls.key, expected_pins, timeout)
+        else:
+            client = httpx.AsyncClient(timeout=timeout)
         runner = build_runner(cfg, engine, db, client, signing_key=signing_key)
         state["runner"] = app.state.runner = runner
         db.start()
@@ -281,6 +310,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             db.audit(node_id=cfg.node_id, event="update_rejected", run_id=run_id, round_num=round_num, sender=sender,
                      receiver=cfg.node_id, detail={"reason": "sender is not a current or scheduled neighbour"})
             raise HTTPException(403, detail=f"{sender} is not a neighbour of {cfg.node_id}")
+        require_caller(request, sender, peer, run_id, round_num)
         body = await request.body()
         if signing_key is not None:  # who really sent this? (a checksum alone proves nothing)
             reason = None
@@ -325,13 +355,14 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         return {"accepted": True, **answer, "node_id": cfg.node_id}
 
     @app.get("/snapshot", dependencies=peer_only)
-    async def snapshot(requester: str, rejoin_round: int | None = None):
+    async def snapshot(requester: str, request: Request, rejoin_round: int | None = None):
         """A neighbour's one-off full resync: my theta_hat (plus its mirror and our edge's lambda). Never data."""
         if not cfg.is_admm:
             raise HTTPException(404, detail=f"{engine.label} keeps no theta_hat snapshot")
         r = runner()
         if r.peer(requester) is None:
             raise HTTPException(403, detail=f"{requester} is not a neighbour of {cfg.node_id}")
+        require_caller(request, requester, r.peer(requester), r.run_id, r.current_round)
         from .qgadmm.engine import snapshot_body
 
         snap = await asyncio.to_thread(engine.snapshot_for, requester)
@@ -355,7 +386,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
 
         async def go():
             try:
-                docs = await discovery.fetch_membership(runner().client, url, cfg.shared_secret)
+                docs = await discovery.fetch_membership(runner().client, url, cfg.shared_secret, cfg.node_id)
             except discovery.DirectoryError as exc:
                 log.warning("could not fetch membership from %s: %s", sender, exc)
                 return
@@ -368,8 +399,13 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         state["fetch"] = asyncio.create_task(go())
 
     @app.get("/membership", dependencies=peer_only)
-    async def membership_get():
+    async def membership_get(request: Request):
         r = runner()
+        if cfg.tls:  # a hospital asking for my documents must be one of my chain's members, with its own key
+            sender = request.headers.get(wire.H_SENDER, "")
+            if not r.member(sender):
+                raise HTTPException(403, detail=f"{sender or 'the caller'} is not a member of {cfg.node_id}'s chain")
+            require_caller(request, sender, r.member(sender))
         docs = [d for d in [r.membership, *r._pending] if d is not None and d.signature]
         return {"node_id": cfg.node_id, "epoch": r.epoch, "documents": [d.to_dict() for d in docs]}
 

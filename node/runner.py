@@ -28,7 +28,7 @@ from typing import Mapping
 
 import httpx
 
-from . import security, wire
+from . import pinning, security, wire
 from .config import Neighbour, NodeConfig
 from .engine import Engine, NeighborUpdate, UpdatePackage
 from .membership import Member, Membership, link_key
@@ -56,14 +56,14 @@ def new_run_id() -> str:
     return f"run-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{secrets.token_hex(2)}"
 
 
-def static_membership(cfg: NodeConfig, public_key: str | None = None) -> Membership:
+def static_membership(cfg: NodeConfig, public_key: str | None = None, tls_pin: str | None = None) -> Membership:
     """Epoch 0: the chain written in my own config. With a directory: no chain until I have registered."""
-    me = Member(cfg.node_id, cfg.advertise_url, public_key, cfg.display_name)
+    me = Member(cfg.node_id, cfg.advertise_url, public_key, cfg.display_name, tls_pin)
     if cfg.directory:
         return Membership(epoch=-1, chain=(), members={cfg.node_id: me}, reason="not registered with the directory yet")
     nbs = [n.id for n in cfg.neighbours]
     chain = cfg.chain or tuple(nbs[:1] + [cfg.node_id] + nbs[1:])
-    members = {n.id: Member(n.id, n.url, n.public_key) for n in cfg.neighbours}
+    members = {n.id: Member(n.id, n.url, n.public_key, tls_pin=n.tls_pin) for n in cfg.neighbours}
     members[cfg.node_id] = me
     for other in chain:  # chain members that are not my neighbours: no address needed, I never call them
         members.setdefault(other, Member(other, ""))
@@ -81,6 +81,7 @@ class Runner:
         self.client = client
         self.signing_key = signing_key
         self.public_key = security.public_key_b64(signing_key) if signing_key is not None else None
+        self.tls_pin = pinning.cert_file_pin(cfg.tls.cert) if cfg.tls else None
         self.state = "idle"
         self.run_id: str | None = None
         self.total_rounds = 0
@@ -99,7 +100,7 @@ class Runner:
         self._task: asyncio.Task | None = None
         self._finished_runs: list[str] = []
         self._seen_ops: set[str] = set()
-        self._set_membership(membership or static_membership(cfg, self.public_key))
+        self._set_membership(membership or static_membership(cfg, self.public_key, self.tls_pin))
 
     # -- membership -----------------------------------------------------------
     @property
@@ -124,10 +125,23 @@ class Runner:
                 return doc.members[node_id]
         return None
 
+    def member(self, node_id: str) -> Member | None:
+        """Any member of my current or scheduled chain."""
+        for doc in [*reversed(self._pending), self.membership]:
+            if doc and node_id in doc.members:
+                return doc.members[node_id]
+        return None
+
+    def known_parties(self) -> list[tuple[str, str, str, str | None]]:
+        """(id, label, url, TLS pin) of every member of my current and scheduled chains: whom I may dial."""
+        return [(m.id, m.display_name or m.id, m.url, m.tls_pin)
+                for doc in [*reversed(self._pending), self.membership] if doc for m in doc.members.values()]
+
     def _set_membership(self, doc: Membership) -> None:
         self.membership = doc
         ids = doc.neighbours_of(self.cfg.node_id)
-        self.neighbours = tuple(Neighbour(m, doc.members[m].url, doc.members[m].public_key) for m in ids)
+        self.neighbours = tuple(Neighbour(m, doc.members[m].url, doc.members[m].public_key, doc.members[m].tls_pin)
+                                for m in ids)
         self.neighbour_status = {m: self.neighbour_status.get(m, "unknown") for m in ids}
 
     def offer_membership(self, doc: Membership) -> str:
@@ -423,17 +437,26 @@ class Runner:
             else:
                 status = f"rejected-{resp.status_code}"
         except httpx.HTTPError as exc:
-            status = "unreachable"
-            log.warning("round %d: neighbour %s unreachable (%s)", r, n.id, type(exc).__name__)
+            status = "tls-key-mismatch" if pinning.is_pin_error(exc) else "unreachable"
+            if status == "unreachable":
+                log.warning("round %d: neighbour %s unreachable (%s)", r, n.id, type(exc).__name__)
+            else:
+                self.tls_refused(n.id, exc, run_id, r)
         self.neighbour_status[n.id] = status
         self.db.update_sent(run_id=run_id, round_num=r, sender=self.cfg.node_id, receiver=n.id,
                             payload_bytes=pkg.payload_bytes if status == "delivered" else 0,
                             full_precision_bytes=pkg.full_precision_bytes, bits=pkg.bits, dtype=pkg.dtype,
                             checksum=pkg.checksum, status=status)
-        if status != "delivered":
+        if status not in ("delivered", "tls-key-mismatch"):
             self.db.audit(node_id=self.cfg.node_id, event="neighbour_unreachable" if status == "unreachable" else "update_rejected",
                           run_id=run_id, round_num=r, sender=self.cfg.node_id, receiver=n.id, detail={"status": status})
         return n, participating, on_time
+
+    def tls_refused(self, peer: str, exc: BaseException, run_id: str | None = None, r: int | None = None) -> None:
+        """A neighbour's certificate key is not the one on record: refused before anything was sent."""
+        log.error("refused to send to %s: %s", peer, exc)
+        self.db.audit(node_id=self.cfg.node_id, event="tls_pin_mismatch", run_id=run_id, round_num=r,
+                      sender=self.cfg.node_id, receiver=peer, detail={"reason": str(exc)})
 
     async def _collect(self, run_id: str, r: int, expected: set[str]) -> dict[str, NeighborUpdate]:
         loop = asyncio.get_running_loop()

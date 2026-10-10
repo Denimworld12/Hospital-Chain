@@ -47,7 +47,8 @@ def test_kit_has_every_file_with_the_real_addresses_and_only_its_own_keys(tmp_pa
     assert not (tmp_path / "hospital-a").exists() and not (tmp_path / "directory").exists()
     # no other party's private key, and not the CA key or the directory's signing key
     assert sorted(p.name for p in (kit / "pki").iterdir()) == ["ca.crt", "directory", "hospital-b"]
-    assert [p.name for p in (kit / "pki" / "directory").iterdir()] == ["signing.pub"]
+    # the directory's public halves only: its document key, and its certificate (this kit pins its TLS key)
+    assert sorted(p.name for p in (kit / "pki" / "directory").iterdir()) == ["signing.pub", "tls.crt"]
     assert (kit / "data" / "hospital-b.csv").read_bytes() == (ROOT / "data/slices/hospital-b.csv").read_bytes()
 
     cfg = load_config(kit / "config" / "hospital-b.yaml")
@@ -57,6 +58,7 @@ def test_kit_has_every_file_with_the_real_addresses_and_only_its_own_keys(tmp_pa
     assert cfg.chain == () and cfg.neighbours == (), "the directory places the hospital"
     assert cfg.directory.url == "https://100.101.1.99:8100"
     assert cfg.directory.credential_ref == "file:/pki/hospital-b/credential"
+    assert cfg.directory.tls_pin_ref == "file:/pki/directory/tls.crt"
     assert cfg.tls.ca == "/pki/ca.crt" and cfg.signing_key == "/pki/hospital-b/signing.key"
     assert cfg.shared_secret == SECRET and cfg.data_slice == "/data/hospital-b.csv"
     repo = load_config(ROOT / "config" / "hospital-b.yaml")

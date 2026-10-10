@@ -58,7 +58,7 @@ from typing import Callable, Mapping, Sequence
 
 import httpx
 
-from .. import security, wire
+from .. import pinning, security, wire
 from ..engine import NeighborUpdate, UpdatePackage
 from ..runner import ACTIVE, RoundMetrics, Runner
 from . import engine as qengine
@@ -509,7 +509,10 @@ class ChainRoundScheduler(Runner):
             resp = await self.client.get(f"{n.url}/snapshot", params=params,
                                          headers={wire.H_SECRET: self.cfg.shared_secret})
         except httpx.HTTPError as exc:
-            log.warning("snapshot from %s failed: %s", m, type(exc).__name__)
+            if pinning.is_pin_error(exc):
+                self.tls_refused(m, exc, self.run_id, self.current_round)
+            else:
+                log.warning("snapshot from %s failed: %s", m, type(exc).__name__)
             return None
         if resp.status_code != 200:
             log.warning("snapshot from %s refused: %s", m, resp.status_code)

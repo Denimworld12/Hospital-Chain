@@ -11,7 +11,8 @@ certificate that does not cover a party's requested names is re-issued):
     directory/tls.crt, tls.key     the directory's HTTPS certificate
     directory/signing.key, .pub    signs membership documents; every node gets signing.pub
     directory/hospitals.yaml       who may register, in placement order: id + SHA-256 of its credential
-    <hospital>/tls.crt, tls.key    the node's HTTPS certificate (SAN = the names peers reach it by)
+    <hospital>/tls.crt, tls.key    the node's HTTPS certificate (SAN = the names it is reached by; peers
+                                   pin its key, which the node registers with the directory)
     <hospital>/signing.key, .pub   signs its /update packets; the public half travels in the
                                    directory's membership documents
     <hospital>/credential          its pre-shared directory credential (only the hash leaves this folder)
@@ -96,7 +97,9 @@ def ensure_identity(out: Path, name: str, hosts: list[str], *, credential: bool)
     d = out / name
     names = list(dict.fromkeys([*hosts, name]))
     if not (d / "tls.crt").is_file() or not _covers(d / "tls.crt", names):  # new, or reached at a new address
-        k = ec.generate_private_key(ec.SECP256R1())
+        # a new address keeps the party's TLS key: peers pin the key (node/pinning.py), not the address
+        k = (serialization.load_pem_private_key((d / "tls.key").read_bytes(), password=None)
+             if (d / "tls.key").is_file() else ec.generate_private_key(ec.SECP256R1()))
         now = dt.datetime.now(dt.timezone.utc)
         cert = (x509.CertificateBuilder()
                 .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))

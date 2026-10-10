@@ -440,9 +440,27 @@ A checksum only catches accidental corruption: someone who controls the wire can
 change the bytes and recompute it. That was acceptable inside one Docker network;
 it is not once hospitals run on separate machines. So:
 
-- **TLS on every link.** Nodes and the directory serve HTTPS with certificates
-  from the network CA and verify each other's certificates, hostname included.
-  Plain HTTP is not served at all.
+- **TLS on every link, pinned to identity.** Nodes and the directory serve HTTPS
+  with certificates from the network CA. Certificate verification stays on, but a
+  peer is identified by its certificate's key, not by the address it was dialled
+  at (`node/pinning.py`). Each hospital registers its key's SHA-256 pin with the
+  directory. The registration uses its own kit credential and must connect with
+  that very certificate. The directory publishes the pin in its signed membership
+  documents. The directory's own pin comes from each hospital's kit
+  (`directory.tls_pin`), never from the directory.
+  - **The dialler** checks the server's key right after the handshake, before
+    sending anything.
+  - **The receiver** asks for a client certificate and checks it against the pin
+    of the hospital the caller claims to be, on `/update`, `/snapshot` and
+    `GET /membership`.
+  - **On a mismatch** the connection is refused with a message that says what to
+    do (e.g. "hospital-b's TLS key changed ... re-register it with the directory").
+    It is audited as `tls_pin_mismatch` and never falls back to checking the
+    hostname.
+  - **When the directory is down**, the pins still work: they come from the signed
+    documents each node already holds.
+  - **Plain HTTP** is not served at all. The dashboard's relay still checks node
+    certificates by address.
 - **Signed updates.** Every `/update` carries an Ed25519 signature over the
   body's SHA-256 and every `X-MedChain-*` header that steers training (run,
   round, sender, receiver, sequence, snapshot fingerprints, residual view, stop
@@ -463,8 +481,9 @@ enterprise CA they trust) and keep any CA key offline; generate each signing key
 on the hospital's own machine and register only its public half; deliver each
 directory credential out of band and rotate it like a password; restrict the
 node and directory ports to the hospitals' private network (a mesh such as
-Tailscale is still worth it for NAT traversal); and consider mutual TLS so that
-connections are refused before a signature is even checked.
+Tailscale is still worth it for NAT traversal). Also consider requiring a client
+certificate on every endpoint. Today `/round/*` and `/assess*` also accept the
+dashboard, which has no certificate, on the shared secret alone.
 
 ## Running on separate machines
 
@@ -511,7 +530,8 @@ is never re-keyed. Every hospital kit holds:
   `config/hospital-X.yaml`.
 - `pki/`: only this hospital's own TLS certificate and key (issued for its
   address), its update-signing key and its directory credential, plus the CA
-  certificate and the directory's public key. No other party's private key.
+  certificate, the directory's public key and the directory's certificate (whose
+  key the node pins). No other party's private key.
 - `docker-compose.hospital.yaml`, which runs only that node.
 - `data/hospital-X.csv`, that hospital's slice. Pass `--data hospital-X=path.csv`
   to use different data.
@@ -559,9 +579,10 @@ stop it from ever registering again, delete its line from `hospitals.yaml`.
 **Changing an address without re-provisioning.** `MEDCHAIN_ADVERTISE_URL`
 replaces a node's own address and `MEDCHAIN_DIRECTORY_URL` the directory's, from
 the environment. On restart the node re-registers its new address and the
-directory passes it to its neighbours. The node's certificate must cover the new
-address: re-run `provision.py` for that hospital with the new address (only its
-certificate is re-issued). A node with a static chain (`chain:` and `neighbours:`
+directory passes it to its neighbours. Node-to-node links pin the certificate's
+key, not its address, so they keep working. Only the dashboard's relay checks the
+address. For the relay, re-run `provision.py` for that hospital with the new
+address: its certificate is re-issued for the same key, so its pin is unchanged. A node with a static chain (`chain:` and `neighbours:`
 in its YAML, no `directory:`, as the tests use) still takes
 `MEDCHAIN_PEER_<ID>_URL` for each neighbour: `<ID>` is the node id upper-cased,
 with `-` and other characters turned into `_`.
