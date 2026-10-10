@@ -33,11 +33,11 @@ pytestmark = [
 ]
 
 ROOT = Path(__file__).resolve().parents[2]
-# the hospitals a plain `docker compose up` starts; hospital-e (profile `join`) is the one that joins later
-STARTED = os.environ.get("MEDCHAIN_NODES", "hospital-a,hospital-b,hospital-c,hospital-d").split(",")
+# the hospitals a plain `docker compose up` starts; hospital-d (profile `join`, Swiss data) joins later
+STARTED = os.environ.get("MEDCHAIN_NODES", "hospital-a,hospital-b,hospital-c").split(",")
 ALL = {c.node_id: c for c in (load_config(p) for p in sorted((ROOT / "config").glob("hospital-*.yaml")))}
 NODES = {n: ALL[n] for n in STARTED}
-JOINER = next((n for n in ALL if n not in NODES), None)
+JOINER = os.environ.get("MEDCHAIN_JOINER", "hospital-d") if os.environ.get("MEDCHAIN_JOINER", "hospital-d") in ALL else None
 ENGINE = next(iter(NODES.values())).engine
 ADMM = ENGINE in ("qgadmm", "gadmm_fp")
 CA = os.environ.get("MEDCHAIN_CA", str(ROOT / ".pki" / "ca.crt"))
@@ -463,12 +463,13 @@ def compose(*args: str) -> None:
 @admm_only
 @pytest.mark.skipif(JOINER is None, reason="no spare hospital config to join")
 def test_a_hospital_joins_mid_run_then_a_middle_hospital_leaves_and_the_dashboard_follows():
-    """Chain of 4 -> hospital-e joins mid-run (appended) -> hospital-b leaves (a and c bridge) -> converges.
+    """Chain of 3 -> hospital-d joins mid-run (appended) -> hospital-b leaves (a and c bridge) -> converges.
 
     Checked from outside, the way an operator sees it: the nodes' /status, the observer database and
     the dashboard's snapshot (topology, consensus, network training loss, communication)."""
     wait_idle()
     start_chain = current_chain()
+    n = len(start_chain)
     leaver = start_chain[1]
     run_id = start_via_dashboard(400)
     try:
@@ -479,66 +480,66 @@ def test_a_hospital_joins_mid_run_then_a_middle_hospital_leaves_and_the_dashboar
         joined = wait_until(lambda: db_rows("SELECT round, detail FROM audit_logs WHERE run_id = %s AND node_id = %s "
                                             "AND event = 'joined_run'", (run_id, JOINER)), 90, what=f"{JOINER} joins")
         join_round, detail = joined[0]
-        five = start_chain + [JOINER]
-        assert detail["chain"] == five and detail["start_round"] == join_round
-        for n in start_chain:  # every member switched on that same boundary (written when it reaches it)
+        grown = start_chain + [JOINER]
+        assert detail["chain"] == grown and detail["start_round"] == join_round
+        for m in start_chain:  # every member switched on that same boundary (written when it reaches it)
             changed = wait_until(lambda: db_rows("SELECT round FROM audit_logs WHERE run_id = %s AND node_id = %s "
-                                                 "AND event = 'membership_changed'", (run_id, n)), 60,
-                                 what=f"{n} reaches the boundary")
-            assert [r for (r,) in changed] == [join_round], f"{n} switched on a different round"
+                                                 "AND event = 'membership_changed'", (run_id, m)), 60,
+                                 what=f"{m} reaches the boundary")
+            assert [r for (r,) in changed] == [join_round], f"{m} switched on a different round"
 
         def after_join():
             s = snapshot()
-            return s if s["topology"]["chain"] == five and s["comm"]["hospitals_this_round"] == 5 else None
+            return s if s["topology"]["chain"] == grown and s["comm"]["hospitals_this_round"] == n + 1 else None
 
-        s = wait_until(after_join, 60, what="the dashboard shows five hospitals")
-        assert s["topology"]["links"] == [f"{a}|{b}" for a, b in zip(five, five[1:])]
+        s = wait_until(after_join, 60, what=f"the dashboard shows {n + 1} hospitals")
+        assert s["topology"]["links"] == [f"{a}|{b}" for a, b in zip(grown, grown[1:])]
         assert s["consensus"]["edges"] == s["topology"]["links"]  # the new pair line appears
         assert s["consensus"]["epoch_start_round"] == join_round and not s["consensus"]["reached"]
         assert s["consensus"]["converged_round"] is None  # reset by the membership change
-        assert s["comm"]["hospitals"] == 5 and s["comm"]["links"] == 4 and s["comm"]["packets_per_round"] == 8
+        assert s["comm"]["hospitals"] == n + 1 and s["comm"]["links"] == n and s["comm"]["packets_per_round"] == 2 * n
         by_round = {r["round"]: r for r in s["comm"]["per_round"]}
-        assert by_round[join_round - 1]["hospitals"] == 4 and by_round[join_round - 1]["messages"] == 6
+        assert by_round[join_round - 1]["hospitals"] == n and by_round[join_round - 1]["messages"] == 2 * (n - 1)
         net = {p["round"]: p["hospitals"] for p in s["network_loss"]}
-        assert net[join_round - 1] == 4 and net[join_round] == 5  # the weighted average now spans five hospitals
+        assert net[join_round - 1] == n and net[join_round] == n + 1  # the weighted average now spans the joiner too
 
         wait_until(lambda: rounds_done(JOINER, run_id) >= 10, 60, what=f"{JOINER} trains")
 
         # -- planned departure of a middle hospital: its neighbours bridge
         subprocess.run(["docker", "exec", PREFIX + leaver, "python", "-m", "node.leave"], check=True,
                        capture_output=True, text=True)
-        four = [n for n in five if n != leaver]
+        shrunk = [m for m in grown if m != leaver]
         left = wait_until(lambda: db_rows("SELECT round FROM audit_logs WHERE run_id = %s AND node_id = %s AND "
                                           "event = 'left_chain'", (run_id, leaver)), 60, what=f"{leaver} leaves")
         leave_round = left[0][0]
 
         def after_leave():
             s = snapshot()
-            return s if s["topology"]["chain"] == four and s["comm"]["hospitals_this_round"] == 4 else None
+            return s if s["topology"]["chain"] == shrunk and s["comm"]["hospitals_this_round"] == n else None
 
         s = wait_until(after_leave, 60, what="the dashboard shows the bridged chain")
         assert leaver in s["topology"]["left"]
-        assert s["consensus"]["edges"] == [f"{a}|{b}" for a, b in zip(four, four[1:])]  # a|b, b|c gone; a|c new
+        assert s["consensus"]["edges"] == [f"{a}|{b}" for a, b in zip(shrunk, shrunk[1:])]  # a|b, b|c gone; a|c new
         assert s["consensus"]["epoch_start_round"] == leave_round and s["consensus"]["converged_round"] is None
-        assert s["comm"]["hospitals"] == 4 and s["comm"]["links"] == 3
+        assert s["comm"]["hospitals"] == n and s["comm"]["links"] == n - 1
         net = {p["round"]: p["hospitals"] for p in s["network_loss"]}
-        assert net[leave_round - 1] == 5 and net[leave_round] == 4
+        assert net[leave_round - 1] == n + 1 and net[leave_round] == n
         assert status(leaver)["run_state"] == "left" and not status(leaver)["in_chain"]
 
         # -- and training keeps converging, to consensus on the new chain
-        wait_until(lambda: all(completed(n, run_id) for n in four), 300, what="the bridged chain finishes")
-        final = {n: status(n)["current_round"] for n in four}
+        wait_until(lambda: all(completed(m, run_id) for m in shrunk), 300, what="the bridged chain finishes")
+        final = {m: status(m)["current_round"] for m in shrunk}
         assert len(set(final.values())) == 1 and max(final.values()) < 400, f"no consensus: {final}"
         s = snapshot()
         assert s["consensus"]["reached"] and s["consensus"]["converged_round"] > leave_round
         assert all(s["consensus"]["series"][-1][e] < EPSILON for e in s["consensus"]["edges"])
-        assert s["network_loss"][-1]["hospitals"] == 4
+        assert s["network_loss"][-1]["hospitals"] == n
         bridge = db_rows("SELECT node_id, sender, payload_bytes FROM audit_logs WHERE run_id = %s AND "
                          "event = 'snapshot_resync' AND round = %s", (run_id, leave_round))
         a, c = start_chain[0], start_chain[2]
         assert {(n, snd) for n, snd, _ in bridge} >= {(a, c), (c, a)}  # full snapshot both ways over the new link
     finally:
-        # back to the four-hospital stack for whoever runs next: the joiner leaves, the leaver re-registers
+        # back to the starting stack for whoever runs next: the joiner leaves, the leaver re-registers
         subprocess.run(["docker", "exec", PREFIX + JOINER, "python", "-m", "node.leave"], capture_output=True)
         compose("--profile", "join", "stop", JOINER)
         docker("restart", PREFIX + leaver)

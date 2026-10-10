@@ -1,6 +1,7 @@
 """Issue a MedChain network's keys: a CA, TLS certificates, update-signing keys, directory credentials.
 
     python scripts/pki.py --out .pki --directory directory:directory,localhost \\
+        --service observer:observer,localhost \\
         --hospital hospital-a:hospital-a,localhost --hospital hospital-b:hospital-b,localhost ...
 
 Layout (idempotent: anything that already exists is kept, so re-running only adds what
@@ -11,6 +12,7 @@ certificate that does not cover a party's requested names is re-issued):
     directory/tls.crt, tls.key     the directory's HTTPS certificate
     directory/signing.key, .pub    signs membership documents; every node gets signing.pub
     directory/hospitals.yaml       who may register, in placement order: id + SHA-256 of its credential
+    <service>/tls.crt, tls.key     another service's HTTPS certificate (the observer); nodes pin its key
     <hospital>/tls.crt, tls.key    the node's HTTPS certificate (SAN = the names it is reached by; peers
                                    pin its key, which the node registers with the directory)
     <hospital>/signing.key, .pub   signs its /update packets; the public half travels in the
@@ -144,9 +146,12 @@ def parse_party(spec: str) -> tuple[str, list[str]]:
     return name.strip(), hs
 
 
-def issue(out: Path, directory: tuple[str, list[str]], hospitals: list[tuple[str, list[str]]]) -> None:
+def issue(out: Path, directory: tuple[str, list[str]], hospitals: list[tuple[str, list[str]]],
+          services: list[tuple[str, list[str]]] = ()) -> None:
     ensure_ca(out)
     ensure_identity(out, directory[0], directory[1], credential=False)
+    for name, hosts in services:
+        ensure_identity(out, name, hosts, credential=False)
     for name, hosts in hospitals:
         ensure_identity(out, name, hosts, credential=True)
     write_hospitals(out, directory[0], [h for h, _ in hospitals])
@@ -158,8 +163,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--directory", default="directory:directory,localhost,127.0.0.1",
                     help="id:host,host... the directory is reached by")
     ap.add_argument("--hospital", action="append", default=[], help="id:host,host... (repeatable, placement order)")
+    ap.add_argument("--service", action="append", default=[],
+                    help="id:host,host... another service's TLS identity, e.g. the observer (repeatable)")
     args = ap.parse_args(argv)
-    issue(args.out, parse_party(args.directory), [parse_party(h) for h in args.hospital])
+    issue(args.out, parse_party(args.directory), [parse_party(h) for h in args.hospital],
+          [parse_party(s) for s in args.service])
     print(f"keys and certificates in {args.out}")
     return 0
 

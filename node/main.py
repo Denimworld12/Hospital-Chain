@@ -20,10 +20,11 @@ Endpoints
     POST /assess, /assess/pdf, /assess/ecg, /assess/ecg/pdf
                           per-patient risk assessment (node/assess/routes.py)
 
-Identity comes entirely from the YAML config named by $NODE_CONFIG. With a `directory:`
-block the node registers at start (POST <directory>/register with its own credential) and
-its chain comes from the directory's signed documents; training never waits for the
-directory, so a directory outage only blocks joins and leaves.
+Identity comes from the environment and the optional YAML named by $NODE_CONFIG
+(node/settings.py). With a `directory:` block the node registers at start (POST
+<directory>/register with its own credential) and its chain comes from the directory's
+signed documents; training never waits for the directory, so a directory outage only
+blocks joins and leaves. Telemetry is pushed to the observer service (node/writer.py).
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from pathlib import Path
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -49,7 +51,7 @@ from .engines import build_engine, build_runner
 from .membership import Membership
 from .runner import Runner, new_run_id
 from .trainer import LocalTrainer
-from .writer import DbWriter
+from .writer import DbWriter, ObserverSink
 
 log = logging.getLogger("medchain.node")
 
@@ -71,11 +73,22 @@ class ControlRequest(BaseModel):
     origin: str | None = None
 
 
+def observer_sink(cfg: NodeConfig) -> ObserverSink:
+    timeout = httpx.Timeout(cfg.http.read_timeout_s, connect=cfg.http.connect_timeout_s)
+    if cfg.tls:  # the observer is pinned like the directory: its key comes from the kit
+        pins = [("observer", "the observer", cfg.observer.url, cfg.observer.tls_pin)]
+        client = pinning.pinned_sync_client(cfg.tls.ca, cfg.tls.cert, cfg.tls.key,
+                                            lambda host, port: pinning.pins_at(host, port, pins), timeout)
+    else:
+        client = httpx.Client(timeout=timeout)
+    return ObserverSink(cfg.observer.url, cfg.observer.token, cfg.node_id, client)
+
+
 def create_app(cfg: NodeConfig | None = None, database: Database | None = None) -> FastAPI:
     cfg = cfg or load_config()
-    if database is None:
+    if database is None:  # telemetry: the observer service; Postgres directly only without one (node/writer.py)
         dsn = os.environ.get("DATABASE_URL")
-        database = Database(dsn) if dsn else NullDatabase()
+        database = observer_sink(cfg) if cfg.observer else Database(dsn) if dsn else NullDatabase()
     trainer = LocalTrainer(
         cfg.data_slice,
         test_fraction=cfg.training.test_fraction,
@@ -85,7 +98,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
     )
     engine = build_engine(cfg, trainer)
     assessor = Assessor(cfg.assess.tabular_model, cfg.assess.ecg_model)
-    db = DbWriter(database)
+    db = DbWriter(database, audit_db=Path(cfg.state_dir) / "audit.db")
     started_at = time.time()
     state: dict = {}
     signing_key = security.load_signing_key(cfg.signing_key) if cfg.signing_key else None
@@ -193,7 +206,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        timeout = httpx.Timeout(3.0, connect=1.5)
+        timeout = httpx.Timeout(cfg.http.read_timeout_s, connect=cfg.http.connect_timeout_s)
         if cfg.tls:  # every TLS connection is pinned to the key on record for whoever we dial (node/pinning.py)
             client = pinning.pinned_client(cfg.tls.ca, cfg.tls.cert, cfg.tls.key, expected_pins, timeout)
         else:

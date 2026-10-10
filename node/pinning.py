@@ -167,23 +167,26 @@ class _PinnedStream(httpcore.AsyncNetworkStream):
     async def start_tls(self, ssl_context: ssl.SSLContext, server_hostname: str | None = None,
                         timeout: float | None = None) -> httpcore.AsyncNetworkStream:
         tls = await self._stream.start_tls(ssl_context, server_hostname, timeout)
-        der = tls.get_extra_info("ssl_object").getpeercert(binary_form=True)
-        problem = self._problem(spki_sha256(der) if der else None)
+        problem = _server_problem(tls, self._host, self._port, self._expected)
         if problem:
             await tls.aclose()
             raise PinError(problem)
         return tls
 
-    def _problem(self, presented: str | None) -> str | None:
-        where = f"{self._host}:{self._port}"
-        candidates = self._expected(self._host, self._port)
-        if not candidates:
-            return (f"No TLS key is on record for {where}: it is not an address in this node's signed membership "
-                    "or kit, so the connection was refused.")
-        if any(p.pin and p.pin == presented for p in candidates):
-            return None
-        p = candidates[0]
-        return no_key_on_record(p) if p.pin is None else key_changed(p, f"the certificate served at {where}")
+
+def _server_problem(tls, host: str, port: int, expected) -> str | None:
+    """Why the certificate this TLS stream's server presented is refused (None if its key is on record there)."""
+    der = tls.get_extra_info("ssl_object").getpeercert(True)
+    presented = spki_sha256(der) if der else None
+    where = f"{host}:{port}"
+    candidates = expected(host, port)
+    if not candidates:
+        return (f"No TLS key is on record for {where}: it is not an address in this node's signed membership "
+                "or kit, so the connection was refused.")
+    if any(p.pin and p.pin == presented for p in candidates):
+        return None
+    p = candidates[0]
+    return no_key_on_record(p) if p.pin is None else key_changed(p, f"the certificate served at {where}")
 
 
 class _PinningBackend(httpcore.AsyncNetworkBackend):
@@ -221,6 +224,65 @@ def pinned_client(ca: str, cert: str | None, key: str | None, expected: Callable
     return httpx.AsyncClient(timeout=timeout, transport=PinnedTransport(client_ssl_context(ca, cert, key), expected))
 
 
+# the same, for the blocking client a background thread uses (node/writer.py's observer sink)
+class _PinnedSyncStream(httpcore.NetworkStream):
+    def __init__(self, stream: httpcore.NetworkStream, host: str, port: int, expected):
+        self._stream, self._host, self._port, self._expected = stream, host, port, expected
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return self._stream.read(max_bytes, timeout)
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self._stream.write(buffer, timeout)
+
+    def close(self) -> None:
+        self._stream.close()
+
+    def get_extra_info(self, info: str):
+        return self._stream.get_extra_info(info)
+
+    def start_tls(self, ssl_context: ssl.SSLContext, server_hostname: str | None = None,
+                  timeout: float | None = None) -> httpcore.NetworkStream:
+        tls = self._stream.start_tls(ssl_context, server_hostname, timeout)
+        problem = _server_problem(tls, self._host, self._port, self._expected)
+        if problem:
+            tls.close()
+            raise PinError(problem)
+        return tls
+
+
+class _PinningSyncBackend(httpcore.NetworkBackend):
+    def __init__(self, expected):
+        self._inner, self._expected = httpcore.SyncBackend(), expected
+
+    def connect_tcp(self, host: str, port: int, timeout: float | None = None, local_address: str | None = None,
+                    socket_options=None) -> httpcore.NetworkStream:
+        stream = self._inner.connect_tcp(host, port, timeout=timeout, local_address=local_address,
+                                         socket_options=socket_options)
+        return _PinnedSyncStream(stream, host, port, self._expected)
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        return self._inner.connect_unix_socket(path, timeout=timeout, socket_options=socket_options)
+
+    def sleep(self, seconds: float) -> None:
+        self._inner.sleep(seconds)
+
+
+class PinnedSyncTransport(httpx.HTTPTransport):
+    def __init__(self, ssl_context: ssl.SSLContext, expected: Callable[[str, int], list[Pin]],
+                 limits: httpx.Limits = httpx.Limits()):
+        super().__init__(verify=ssl_context, limits=limits)
+        self._pool = httpcore.ConnectionPool(
+            ssl_context=ssl_context, max_connections=limits.max_connections,
+            max_keepalive_connections=limits.max_keepalive_connections, keepalive_expiry=limits.keepalive_expiry,
+            network_backend=_PinningSyncBackend(expected))
+
+
+def pinned_sync_client(ca: str, cert: str | None, key: str | None, expected: Callable[[str, int], list[Pin]],
+                       timeout: httpx.Timeout) -> httpx.Client:
+    return httpx.Client(timeout=timeout, transport=PinnedSyncTransport(client_ssl_context(ca, cert, key), expected))
+
+
 # -- the receiver -----------------------------------------------------------------------------
 
 
@@ -237,7 +299,7 @@ def _peer_aware_protocol(registry: dict):
         def connection_made(self, transport):
             super().connection_made(transport)
             ssl_object = transport.get_extra_info("ssl_object")
-            der = ssl_object.getpeercert(binary_form=True) if ssl_object is not None else None
+            der = ssl_object.getpeercert(True) if ssl_object is not None else None
             if self.client:
                 registry[tuple(self.client)] = (id(self), spki_sha256(der) if der else None)
 

@@ -43,7 +43,7 @@ COMPOSE_FILE = "docker-compose.hospital.yaml"
 DIRECTORY = "directory"
 DEFAULT_TEMPLATE = ROOT / "config" / "hospital-a.yaml"
 # the node image's build context, laid out as node/Dockerfile expects it (the same image runs the directory)
-SOURCE_FILES = ("node", "directory", "scripts/pki.py", "models/ecg-resnet18.onnx", "data/cardio/cardio_train.csv")
+SOURCE_FILES = ("node", "directory", "observer", "scripts/pki.py", "models/ecg-resnet18.onnx", "data/cardio/cardio_train.csv")
 
 
 def parse_url(name: str, addr: str) -> str:

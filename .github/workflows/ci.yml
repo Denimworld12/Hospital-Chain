@@ -28,6 +28,27 @@ jobs:
       - name: experiments/compare_engines.py on a five-hospital chain
         run: python experiments/compare_engines.py --out /tmp/compare-out-5 --no-sweep --chain hospital-a,hospital-b,hospital-c,hospital-d,hospital-e
 
+  lint:
+    name: ruff + eslint (changed files only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.8.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+        working-directory: dashboard
+      # only what this change touched: there is no repo-wide pass
+      - run: make lint PYTHON=python BASE=${{ github.event.pull_request.base.sha || github.event.before }}
+
   dashboard-build:
     name: dashboard build
     runs-on: ubuntu-latest

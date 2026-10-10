@@ -114,7 +114,6 @@ def simulate(engines: Sequence, rounds: int, *, epsilon: float = 1e-3, stop_on_c
     chain = order[0].pos.chain
     if [e.pos.node_id for e in order] != list(chain):
         raise ValueError("simulate() needs exactly one engine per chain position")
-    by_id = {e.pos.node_id: e for e in order}
     heads = [e for e in order if e.pos.group == HEAD]
     tails = [e for e in order if e.pos.group == TAIL]
     edges = all_edges(chain)
