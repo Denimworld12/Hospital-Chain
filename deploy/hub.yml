@@ -1,0 +1,104 @@
+# The MedChain hub: what the organiser's laptop runs (docs/MULTI_LAPTOP.md). The hospitals
+# run deploy/node.yml on their own laptops.
+#
+#   directory   membership only: where a hospital sits in the chain, who bridges a leave
+#   observer    takes the nodes' pushed telemetry into Postgres (training never waits for it)
+#   postgres    the dashboard's database, on this machine's loopback only
+#   dashboard   http://localhost:8080
+#
+# From the repository root, after `python scripts/provision.py ...` wrote kits/ (the
+# directory kit holds the directory's and observer's keys and a filled `hub.env`):
+#
+#   make hub          # = docker compose --project-directory . --env-file kits/directory/hub.env -f deploy/hub.yml up -d --wait
+#
+# deploy/hub.env.example lists the settings. HUB_KIT is the directory kit's folder.
+
+name: medchain-hub
+
+x-medchain: &medchain
+  image: ${MEDCHAIN_IMAGE:-ghcr.io/denimworld12/medchain-node}:${IMAGE_VERSION:-v1.0.0}
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: medchain
+      POSTGRES_PASSWORD: medchain
+      POSTGRES_DB: medchain
+    ports:
+      - "127.0.0.1:5432:5432"  # loopback only: hospitals never connect to Postgres, the observer does
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medchain -d medchain"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  directory:
+    <<: *medchain
+    command: ["python", "-m", "directory"]
+    environment:
+      DIRECTORY_CONFIG: /config/directory.yaml
+    volumes:
+      - ${HUB_KIT:?set HUB_KIT (the directory kit folder) in hub.env}/config/directory.yaml:/config/directory.yaml:ro
+      - ${HUB_KIT}/pki:/pki:ro
+      - directory-data:/data
+    ports:
+      # must be the port in the directory's address (its kit's config/directory.yaml)
+      - "${HUB_BIND_IP:-0.0.0.0}:${DIRECTORY_PORT:-8100}:${DIRECTORY_PORT:-8100}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import ssl,urllib.request,yaml;p=yaml.safe_load(open('/config/directory.yaml'))['port'];urllib.request.urlopen(f'https://127.0.0.1:{p}/health',timeout=2,context=ssl._create_unverified_context())"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  observer:
+    <<: *medchain
+    command: ["python", "-m", "observer"]
+    environment:
+      DATABASE_URL: postgresql://medchain:medchain@postgres:5432/medchain
+      OBSERVER_PORT: ${OBSERVER_PORT:-8200}
+      OBSERVER_TOKEN_FILE: /pki/observer/token
+      TLS_CERT: /pki/observer/tls.crt
+      TLS_KEY: /pki/observer/tls.key
+      TLS_CA: /pki/ca.crt
+    volumes:
+      - ${HUB_KIT}/pki:/pki:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${HUB_BIND_IP:-0.0.0.0}:${OBSERVER_PORT:-8200}:${OBSERVER_PORT:-8200}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,ssl,urllib.request;urllib.request.urlopen(f\"https://127.0.0.1:{os.environ['OBSERVER_PORT']}/health\",timeout=2,context=ssl._create_unverified_context())"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    image: medchain-dashboard:latest
+    environment:
+      DATABASE_URL: postgresql://medchain:medchain@postgres:5432/medchain
+      HEARTBEAT_STALE_S: "15"
+      # the network's shared secret (from provision.py), for the Start / Pause / Assess relay
+      MEDCHAIN_SHARED_SECRET: ${MEDCHAIN_SHARED_SECRET:?set MEDCHAIN_SHARED_SECRET (the kits' shared secret) in hub.env}
+      # the relay reaches the hospitals over HTTPS at their registered addresses: trust the network CA
+      NODE_EXTRA_CA_CERTS: /pki/ca.crt
+    volumes:
+      - ${HUB_KIT}/pki/ca.crt:/pki/ca.crt:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${DASHBOARD_BIND_IP:-127.0.0.1}:${DASHBOARD_PORT:-8080}:8080"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  directory-data:

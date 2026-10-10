@@ -550,14 +550,36 @@ behind home and hospital NAT without port forwarding and gives each machine a
 stable name such as `hospital-b.tail1234.ts.net`. MedChain encrypts and
 authenticates its own traffic (TLS plus signed updates), so the mesh is for
 reachability, not for security. Do not expose node ports to the public internet.
-A kit's `--bind-ip` publishes the port on one address only, for example the
-machine's Tailscale IP.
+The hub listens for the hospitals on `HUB_BIND_IP` (its `hub.env`), for example
+the hub machine's Tailscale IP.
+
+**Step by step for a friend's laptop:** [`docs/MULTI_LAPTOP.md`](docs/MULTI_LAPTOP.md)
+is the guide for someone who has never used Docker: installing Docker Desktop and
+Tailscale, the kit, the preflight, the hotspot fallback and a troubleshooting table.
+
+### The deployment: one file per laptop
+
+- `deploy/node.yml` runs one hospital node: a single `node` service from the
+  published image `ghcr.io/denimworld12/medchain-node:${IMAGE_VERSION}`, configured by
+  the `.env` next to it. It mounts `./data` at `DATA_PATH` (the slice, checkpoints,
+  saved membership, `audit.db`), `./pki` read-only and `./config` (the engine settings).
+  It publishes `NODE_PORT` on every interface. It has no `container_name` and relies on
+  no Compose DNS: every address comes from `.env` and the directory.
+- `deploy/hub.yml` runs the organiser's laptop: the directory, the observer, Postgres
+  (on `127.0.0.1` only) and the dashboard.
+- `deploy/node.env.example` and `deploy/hub.env.example` list their settings, each
+  with a Tailscale block and a hotspot block that differ only in addresses.
+- `make node KIT=kits/hospital-b` and `make hub` run them from a repository checkout.
+  `make node-native KIT=...` runs the same node without Docker, in its own venv
+  (`.venv-node`, from `node/requirements.txt`), with the kit's `.env` and folders.
+- `.github/workflows/image.yml` builds the image for `linux/amd64` and `linux/arm64`,
+  each on a native runner, and publishes it to GHCR when a `v*` tag is pushed, with
+  `IMAGE_VERSION` baked in (`/health` reports it).
 
 ### Provision one kit per hospital
 
 `scripts/provision.py` follows NVIDIA FLARE's "startup kit" idea. It writes one
-self-contained folder (and optionally a zip) per hospital, plus one for the
-directory:
+self-contained folder (and optionally a zip) per hospital, plus one for the hub:
 
 ```sh
 python scripts/provision.py --zip \
@@ -574,33 +596,36 @@ and `kits/directory/`, plus a `.zip` of each. The network's CA and keys live in
 `kits/.pki/` (or `--pki DIR`) and are reused on every later run, so the network
 is never re-keyed. Every hospital kit holds:
 
-- `config/hospital-X.yaml`: its own address, the directory's address, the
-  observer's address, and one freshly generated shared secret (the same for every kit from the same run; pass
-  it with `--secret` to provision a hospital later). There is no chain in it: the
-  directory places the hospital. Engine settings come from the repository's
-  `config/hospital-X.yaml`.
+- `.env`: filled in. `NODE_ID`, `NODE_PORT`, its own address (`ADVERTISE_ADDR`), the
+  directory's and the observer's, and one freshly generated shared secret (the same
+  for every kit from the same run; pass it with `--secret` to provision a hospital
+  later). The hotspot block is there to switch to. There is no chain in it: the
+  directory places the hospital.
+- `deploy/node.yml`, a copy of the repository's.
+- `config/node.yaml`: the hospital's display name and engine settings, from the
+  repository's `config/hospital-X.yaml`. Nothing about where it runs.
 - `pki/`: only this hospital's own TLS certificate and key (issued for its
   address), its update-signing key and its directory credential, plus the CA
   certificate, the directory's public key and the directory's certificate (whose
   key the node pins), and the observer's certificate (also pinned) and ingest
   token (`pki/observer/token`). No other party's private key, and no database
   credentials.
-- `docker-compose.hospital.yaml`, which runs only that node.
 - `data/hospital-X.csv`, that hospital's slice. Pass `--data hospital-X=path.csv`
   to use different data.
-- `source/`, the node's build context. With `--image <ref>`, the kit uses a
-  prebuilt image instead.
 - `README.md`, with the exact commands, including how to leave the chain.
 
-The directory kit holds the directory's config, its TLS certificate, its
-document-signing key and `hospitals.yaml` (who may register: ids and credential
-hashes only), plus the observer's TLS certificate, key and token so the hub can
-run the observer (its README has the command). Send each kit privately to its operator. Start the directory, then
-each hospital, each with one command:
+`--image repo[:tag]` names a different image (for example a private registry). By
+default the kits use the published `ghcr.io/denimworld12/medchain-node:v1.0.0`.
+
+The directory kit is the hub's. It holds the directory's config, its TLS certificate,
+its document-signing key and `hospitals.yaml` (who may register: ids and credential
+hashes only), the observer's TLS certificate, key and token, and a filled `hub.env`
+for `deploy/hub.yml`. Send each hospital kit privately to its operator. Start the hub,
+then each hospital, each with one command:
 
 ```sh
-docker compose -f docker-compose.directory.yaml up -d --build --wait   # on the directory machine
-docker compose -f docker-compose.hospital.yaml up -d --build --wait    # on each hospital machine
+make hub                                                          # on the hub, from the repository
+docker compose --project-directory . -f deploy/node.yml up -d     # on each hospital machine, in its kit
 ```
 
 Start training from any one node (`POST /round/start`, as above). The start
@@ -612,27 +637,28 @@ it and start it:
 ```sh
 python scripts/provision.py --hospital hospital-e --secret <the network secret> \
   --peers <the same list>,hospital-e=hospital-e.tail1234.ts.net:8005 --directory directory.tail1234.ts.net:8100
-# copy kits/.pki/directory/hospitals.yaml to the directory machine's kits/directory/pki/directory/
+# copy kits/.pki/directory/hospitals.yaml to the hub's kits/directory/pki/directory/
 #   (re-read on every registration, no restart); send kits/hospital-e/ to its operator, who runs:
-docker compose -f docker-compose.hospital.yaml up -d --build --wait
+docker compose --project-directory . -f deploy/node.yml up -d
 ```
 
 The node registers; if a run is going, the directory appends it at the end of
 the chain from a round boundary a few rounds ahead, and it joins the run.
 
-**Removing a hospital for real.** On that hospital's machine:
+**Removing a hospital for real.** On that hospital's machine, in its kit:
 
 ```sh
-docker compose -f docker-compose.hospital.yaml exec hospital-b python -m node.leave
-docker compose -f docker-compose.hospital.yaml down
+docker compose --project-directory . -f deploy/node.yml exec node python -m node.leave
+docker compose --project-directory . -f deploy/node.yml down
 ```
 
 The directory takes it out at the next boundary and its neighbours bridge. To
 stop it from ever registering again, delete its line from `hospitals.yaml`.
 
-**Changing an address without re-provisioning.** `ADVERTISE_ADDR` (alias
-`MEDCHAIN_ADVERTISE_URL`) replaces a node's own address and `DIRECTORY_URL`
-(alias `MEDCHAIN_DIRECTORY_URL`) the directory's, from the environment. On restart the node re-registers its new address and the
+**Changing an address without re-provisioning.** Edit `ADVERTISE_ADDR` (alias
+`MEDCHAIN_ADVERTISE_URL`), a node's own address, or `DIRECTORY_URL` (alias
+`MEDCHAIN_DIRECTORY_URL`), the directory's, in the kit's `.env` and run `up -d` again.
+That is all the hotspot fallback does. On restart the node re-registers its new address and the
 directory passes it to its neighbours. Node-to-node links pin the certificate's
 key, not its address, so they keep working. Only the dashboard's relay checks the
 address. For the relay, re-run `provision.py` for that hospital with the new
@@ -641,17 +667,9 @@ in its YAML, no `directory:`, as the tests use) still takes
 `MEDCHAIN_PEER_<ID>_URL` for each neighbour: `<ID>` is the node id upper-cased,
 with `-` and other characters turned into `_`.
 
-**The observer is optional.** The dashboard and its Postgres can run on any one
-machine:
-
-```sh
-MEDCHAIN_SHARED_SECRET=<kit secret> NODE_EXTRA_CA_CERTS=kits/.pki/ca.crt docker compose up -d postgres dashboard
-```
-
-Kit nodes push their telemetry to the observer (`--observer`, by default the
-directory's host on port 8200), which the hub runs next to Postgres from the
-directory kit; `--observer-db` instead points the nodes straight at a Postgres
-URL, as a fallback. It never coordinates training. A node with no observer still
+**The observer only observes.** Kit nodes push their telemetry to the observer
+(`--observer`, by default the directory's host on port 8200), which `deploy/hub.yml`
+runs next to Postgres. It never coordinates training. A node with no observer still
 trains and still serves `/status` and `/metrics`.
 
 ### Prove it
@@ -896,13 +914,15 @@ docs/screenshots/    models/        scripts/       Makefile
 - `make up` runs the single-machine stack (`docker compose up -d --build --wait`).
   `make lint` runs ruff (`ruff.toml`) and eslint (`dashboard/eslint.config.js`)
   on the files changed since the branch point with main only. CI does the same
-  for each change. There is no repo-wide reformatting.
+  for each change. There is no repo-wide reformatting. `make hub`, `make node` and
+  `make node-native` run the multi-laptop deployment in `deploy/`
+  ([`docs/MULTI_LAPTOP.md`](docs/MULTI_LAPTOP.md)).
 - `observer/` is the telemetry ingest service (`python -m observer`, same image).
 
 - `directory/` is the membership directory (`python -m directory`, same image as
   the nodes). `scripts/pki.py` issues the CA, certificates, signing keys and
   directory credentials (the compose `pki` service runs it).
-- `scripts/provision.py` writes the per-hospital and directory kits,
+- `scripts/provision.py` writes the per-hospital and hub kits for `deploy/`,
   `scripts/preflight.py` reports each neighbour's path (direct or DERP-relayed), and
   `scripts/verify_multihost.py` checks a run across real addresses (see
   [Running on separate machines](#running-on-separate-machines)).

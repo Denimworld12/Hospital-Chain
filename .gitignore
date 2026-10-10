@@ -14,3 +14,5 @@ data/ecg-images/
 kits/
 # keys and certificates issued by scripts/pki.py (the compose stack writes them on first start)
 .pki/
+# make node-native builds its own venv
+.venv-node/

@@ -460,6 +460,12 @@ def compose(*args: str) -> None:
     subprocess.run([*COMPOSE, *args], check=True, capture_output=True, text=True, cwd=ROOT)
 
 
+def loss_rounds(s: dict) -> set[int]:
+    """Rounds in the dashboard's network loss: a round shows once every member's metrics row reached the observer,
+    which each node pushes from its own queue, so it can trail the round's comm counts by a moment."""
+    return {p["round"] for p in s["network_loss"]}
+
+
 @admm_only
 @pytest.mark.skipif(JOINER is None, reason="no spare hospital config to join")
 def test_a_hospital_joins_mid_run_then_a_middle_hospital_leaves_and_the_dashboard_follows():
@@ -490,7 +496,8 @@ def test_a_hospital_joins_mid_run_then_a_middle_hospital_leaves_and_the_dashboar
 
         def after_join():
             s = snapshot()
-            return s if s["topology"]["chain"] == grown and s["comm"]["hospitals_this_round"] == n + 1 else None
+            return s if (s["topology"]["chain"] == grown and s["comm"]["hospitals_this_round"] == n + 1
+                         and loss_rounds(s) >= {join_round - 1, join_round}) else None
 
         s = wait_until(after_join, 60, what=f"the dashboard shows {n + 1} hospitals")
         assert s["topology"]["links"] == [f"{a}|{b}" for a, b in zip(grown, grown[1:])]
@@ -515,7 +522,8 @@ def test_a_hospital_joins_mid_run_then_a_middle_hospital_leaves_and_the_dashboar
 
         def after_leave():
             s = snapshot()
-            return s if s["topology"]["chain"] == shrunk and s["comm"]["hospitals_this_round"] == n else None
+            return s if (s["topology"]["chain"] == shrunk and s["comm"]["hospitals_this_round"] == n
+                         and loss_rounds(s) >= {leave_round - 1, leave_round}) else None
 
         s = wait_until(after_leave, 60, what="the dashboard shows the bridged chain")
         assert leaver in s["topology"]["left"]
