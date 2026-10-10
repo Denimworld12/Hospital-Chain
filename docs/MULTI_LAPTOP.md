@@ -223,11 +223,12 @@ You run the **hub** (the directory, the observer, Postgres and the dashboard) fr
 a checkout of this repository. Run it with Docker on your own laptop.
 
 1. **Make the kits.** List every hospital with the address the others will reach
-   it at, and your laptop as the directory:
+   it at (including any you run yourself, like `hospital-d` here), and your
+   laptop as the directory:
 
    ```sh
    python scripts/provision.py --zip \
-     --peers hospital-a=alex-laptop.tail1234.ts.net:8001,hospital-b=kim-laptop.tail1234.ts.net:8002,hospital-c=lee-laptop.tail1234.ts.net:8003 \
+     --peers hospital-a=alex-laptop.tail1234.ts.net:8001,hospital-b=kim-laptop.tail1234.ts.net:8002,hospital-c=lee-laptop.tail1234.ts.net:8003,hospital-d=sam-laptop.tail1234.ts.net:8004 \
      --directory sam-laptop.tail1234.ts.net:8100
    ```
 
