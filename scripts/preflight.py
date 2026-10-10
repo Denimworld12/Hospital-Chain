@@ -2,7 +2,14 @@
 
     python scripts/preflight.py --node https://localhost:8001 --ca pki/ca.crt
 
-Run it on each hospital's machine. For every neighbour the local node reports (GET
+Run it on each hospital's machine, with its node running. Inside the node's own container
+(deploy/node.yml) it needs no arguments, since it reads NODE_PORT and TLS_CA there:
+
+    docker compose --project-directory . -f deploy/node.yml exec node python scripts/preflight.py
+
+From inside the container it dials the neighbours exactly as the node does, so a name the
+container cannot resolve (a Tailscale MagicDNS name under Docker Desktop) shows up as
+"unreachable" with the reason. For every neighbour the local node reports (GET
 /status), it prints how this machine reaches that neighbour's address:
 
     direct      a direct path: a Tailscale peer reached peer-to-peer, or an address
@@ -13,7 +20,8 @@ Run it on each hospital's machine. For every neighbour the local node reports (G
     unreachable the neighbour's node does not answer /health
 
 Tailscale's view comes from `tailscale ping` (which also establishes the path) and
-`tailscale status --json`, both read on the host. Containers cannot see it. The
+`tailscale status --json`, both read on the host. Containers cannot see it: there the path
+is reported as "unknown" and only reachability is checked. The
 dialled address must be the neighbour's Tailscale IP or MagicDNS name for the path to
 be reported.
 """
@@ -23,6 +31,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import os
 import re
 import shutil
 import ssl
@@ -84,6 +93,8 @@ def tailscale(*args: str) -> str | None:
 
 
 def path_to(host: str, *, ping: bool) -> tuple[str, str]:
+    if not shutil.which("tailscale"):
+        return "unknown", "no tailscale command on this PATH (as inside a container): reachability only"
     raw = tailscale("status", "--json")
     status = json.loads(raw) if raw else {}
     peer = find_peer(status, host) if status else None
@@ -100,8 +111,11 @@ def path_to(host: str, *, ping: bool) -> tuple[str, str]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--node", required=True, help="this machine's node, e.g. https://localhost:8001")
-    ap.add_argument("--ca", help="the network CA (pki/ca.crt) to check the node's certificate")
+    port = os.environ.get("NODE_PORT")
+    ap.add_argument("--node", required=not port, default=f"https://localhost:{port}" if port else None,
+                    help="this machine's node, e.g. https://localhost:8001 (default: NODE_PORT's, in its container)")
+    ap.add_argument("--ca", default=os.environ.get("TLS_CA") or None,
+                    help="the network CA (pki/ca.crt) to check the node's certificate (default: TLS_CA)")
     ap.add_argument("--no-ping", action="store_true", help="read `tailscale status` only, without pinging")
     args = ap.parse_args(argv)
     verify: ssl.SSLContext | bool = True
@@ -119,11 +133,12 @@ def main(argv: list[str] | None = None) -> int:
         host = urlsplit(n["url"]).hostname or ""
         kind, how = path_to(host, ping=not args.no_ping)
         try:
-            alive = httpx.get(f"{n['url']}/health", timeout=5, verify=verify).status_code == 200
-        except httpx.HTTPError:
-            alive = False
-        if not alive:
-            kind, worst = "unreachable", 1
+            code = httpx.get(f"{n['url']}/health", timeout=5, verify=verify).status_code
+            why = "" if code == 200 else f"/health answered {code}"
+        except httpx.HTTPError as exc:
+            why = f"{type(exc).__name__}: {exc}"
+        if why:
+            kind, how, worst = "unreachable", why, 1
         print(f"  {st['node_id']} <-> {n['id']:<14} {kind:<11} {how}  ({n['url']}, last send: {n.get('last_send')})")
     if not st.get("neighbours"):
         print("  no neighbours yet")

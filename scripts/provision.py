@@ -1,10 +1,22 @@
-"""Generate MedChain kits: one folder (optionally one zip) per hospital, plus one for the directory.
+"""Generate MedChain kits: one folder (optionally one zip) per hospital, plus one for the hub.
 
 A hospital kit is everything one collaborator needs to run their node on their own
-machine: its config (the directory's address, its own credential, TLS and signing
-keys), a compose file that runs only that node, its own data slice, its own keys and
-certificate, the node's build context (or a prebuilt image reference) and a README with
-the exact commands. The directory kit runs the membership directory. Unpack, run one command.
+laptop, laid out for deploy/node.yml (docs/MULTI_LAPTOP.md):
+
+    deploy/node.yml     the one-service compose file (a copy of the repo's)
+    .env                this hospital's settings, filled in: NODE_ID, NODE_PORT, its address and
+                        the hub's (a Tailscale block, and a hotspot block to switch to), the network secret
+    pki/                only its own TLS and signing keys and directory credential, plus the public
+                        material it pins (CA, the directory's and the observer's certificates, the
+                        directory's document key) and the observer's ingest token
+    data/               its data slice; the node keeps its checkpoints, saved membership and
+                        audit.db here too
+    config/node.yaml    its display name and the engine settings (from config/<id>.yaml)
+    README.md           the commands
+
+Unzip, check `.env`, run `docker compose --project-directory . -f deploy/node.yml up`. The
+directory kit is the hub's: the directory's config and keys, the observer's keys, and a
+filled `hub.env` for `make hub` (deploy/hub.yml) from the repository.
 
     python scripts/provision.py \\
         --peers hospital-a=100.101.1.10:8001,hospital-b=100.101.1.11:8002,hospital-c=100.101.1.12:8003 \\
@@ -25,6 +37,9 @@ every registration, no restart) and start the new kit; the directory appends it.
 from __future__ import annotations
 
 import argparse
+import ipaddress
+import os
+import re
 import secrets
 import shutil
 import sys
@@ -39,15 +54,17 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import pki  # noqa: E402
-from node.config import ADVERTISE_URL_ENV, DIRECTORY_URL_ENV, load_config  # noqa: E402
+from node.config import build_config  # noqa: E402
+from node.settings import NodeSettings, apply_env  # noqa: E402
 
-COMPOSE_FILE = "docker-compose.hospital.yaml"
+NODE_COMPOSE = ROOT / "deploy" / "node.yml"
+UP = "docker compose --project-directory . -f deploy/node.yml"
+IMAGE_VERSION = "v1.0.0"  # the published node image's tag (.github/workflows/image.yml)
 DIRECTORY = "directory"
 OBSERVER = "observer"
 OBSERVER_PORT = 8200
 DEFAULT_TEMPLATE = ROOT / "config" / "hospital-a.yaml"
-# the node image's build context, laid out as node/Dockerfile expects it (the same image runs the directory)
-SOURCE_FILES = ("node", "directory", "observer", "scripts/pki.py", "models/ecg-resnet18.onnx", "data/cardio/cardio_train.csv")
+TAILSCALE = ipaddress.ip_network("100.64.0.0/10")
 
 
 def parse_url(name: str, addr: str) -> str:
@@ -95,28 +112,107 @@ def listen_port(node_id: str, url: str, template: Path) -> int:
     return int(raw["port"])
 
 
-def node_yaml(node_id: str, url: str, directory_url: str, secret: str, template: Path,
-              observer_url: str | None) -> dict:
+ENGINE_ONLY_DROP = ("node_id", "port", "host", "advertise_url", "chain", "neighbours", "directory", "observer", "tls",
+                    "signing_key", "shared_secret", "data_slice", "data_path", "checkpoint_dir")
+
+
+def engine_yaml(node_id: str, template: Path) -> dict:
+    """The kit's config/node.yaml: the hospital's name and the engine settings, nothing about where it runs.
+
+    Identity, addresses, keys and the secret come from the kit's `.env` and deploy/node.yml instead."""
     raw, own = base_config(node_id, template)
-    for k in ("chain", "neighbours"):
-        raw.pop(k, None)
-    raw.update(
-        node_id=node_id,
-        display_name=raw.get("display_name") if own else node_id,
-        port=listen_port(node_id, url, template),
-        host="0.0.0.0",
-        advertise_url=url,
-        directory={"url": directory_url, "credential_file": f"/pki/{node_id}/credential",
-                   "public_key": "file:/pki/directory/signing.pub", "tls_pin": "file:/pki/directory/tls.crt"},
-        tls={"cert": f"/pki/{node_id}/tls.crt", "key": f"/pki/{node_id}/tls.key", "ca": "/pki/ca.crt"},
-        signing_key=f"/pki/{node_id}/signing.key",
-        shared_secret=secret,
-        data_slice=f"/data/{node_id}.csv",
-    )
-    if observer_url:
-        raw["observer"] = {"url": observer_url, "token_file": f"/pki/{OBSERVER}/token",
-                           "tls_pin": f"file:/pki/{OBSERVER}/tls.crt"}
+    raw = {k: v for k, v in raw.items() if k not in ENGINE_ONLY_DROP}
+    raw["display_name"] = raw.get("display_name") if own else node_id
     return raw
+
+
+def hostport(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.hostname}:{parts.port}" if parts.port else str(parts.hostname)
+
+
+def split_image(image: str | None) -> tuple[str | None, str]:
+    """`--image repo[:tag]` -> (MEDCHAIN_IMAGE, IMAGE_VERSION); none -> the published image's default tag."""
+    if not image:
+        return None, IMAGE_VERSION
+    repo, sep, tag = image.rpartition(":")
+    if not sep or "/" in tag:  # no tag (a ':' in a registry port is not one)
+        return image, "latest"
+    return repo, tag
+
+
+def node_env(node_id: str, port: int, url: str, directory_url: str, observer_url: str, secret: str,
+             image: str | None) -> str:
+    """The kit's `.env`, laid out like deploy/node.env.example: a Tailscale block and a hotspot block."""
+    repo, version = split_image(image)
+    d, o = urlsplit(directory_url), urlsplit(observer_url)
+    return textwrap.dedent(f"""\
+        # MedChain hospital node settings for {node_id}, generated by scripts/provision.py.
+        # Read by deploy/node.yml (and by `make node-native`). docs/MULTI_LAPTOP.md walks through it.
+
+        # ---- Which hospital this laptop is: check it matches what the organiser told you ----
+        NODE_ID={node_id}
+        NODE_PORT={port}
+
+        # ======== Tailscale (the normal way) ========
+        # This laptop's MagicDNS name (or Tailscale IP, `tailscale ip -4`), with NODE_PORT:
+        ADVERTISE_ADDR={hostport(url)}
+        # The organiser's laptop (the hub), which runs the directory and the observer:
+        DIRECTORY_URL={directory_url}
+        OBSERVER_URL={observer_url}
+
+        # ======== Phone hotspot (fallback) ========
+        # To switch: put a # in front of the three Tailscale lines above, remove the # from the
+        # three lines below, and put in the IP addresses the hotspot gave each laptop.
+        #ADVERTISE_ADDR=THIS-LAPTOPS-HOTSPOT-IP:{port}
+        #DIRECTORY_URL=https://HUB-HOTSPOT-IP:{d.port or 443}
+        #OBSERVER_URL=https://HUB-HOTSPOT-IP:{o.port or 443}
+
+        # ---- The network: filled in by the kit, the same on every laptop. Don't change. ----
+        SHARED_SECRET={secret}
+        IMAGE_VERSION={version}
+        """) + (f"MEDCHAIN_IMAGE={repo}\n" if repo else "") + textwrap.dedent("""\
+        # Rounds over a real network take longer than on one machine: give each one time.
+        ROUND_TIMEOUT_S=15
+        HTTP_CONNECT_TIMEOUT_S=5
+        HTTP_READ_TIMEOUT_S=10
+        """)
+
+
+def read_env(text: str) -> dict[str, str]:
+    """The variables an `.env` sets (KEY=value lines; # comments and blank lines skipped)."""
+    env = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, _, v = line.partition("=")
+            env[k.strip()] = v.strip()
+    return env
+
+
+def interpolate(value: str, env: dict[str, str]) -> str:
+    """Compose's ${VAR}, ${VAR:-default} and ${VAR:?message} against `env`."""
+    def sub(m: re.Match) -> str:
+        name, op, arg = m.group(1), m.group(2), m.group(3) or ""
+        if env.get(name):
+            return env[name]
+        if op == ":?":
+            raise ValueError(f"{name} is not set: {arg}")
+        return arg if op == ":-" else ""
+    return re.sub(r"\$\{(\w+)(?:(:-|:\?)([^}]*))?\}", sub, value)
+
+
+def container_env(env: dict[str, str]) -> dict[str, str]:
+    """What the node sees inside deploy/node.yml's container: the `.env` plus the file's own `environment:`."""
+    service = yaml.safe_load(NODE_COMPOSE.read_text())["services"]["node"]
+    return {**env, **{k: interpolate(str(v), env) for k, v in (service.get("environment") or {}).items()}}
+
+
+def check_kit(kit: Path, env: dict[str, str]) -> None:
+    """Validate the kit as its node will load it in deploy/node.yml (container paths, not read here)."""
+    settings = NodeSettings(**container_env(env))
+    raw = yaml.safe_load((kit / "config" / "node.yaml").read_text()) or {}
+    build_config(apply_env(raw, settings, str(kit / ".env")), str(kit / ".env"))
 
 
 def ensure_observer_token(pki_dir: Path, token: str | None) -> None:
@@ -142,31 +238,6 @@ def copy_keys(pki_dir: Path, kit: Path, party: str) -> None:
         shutil.copyfile(pki_dir / OBSERVER / f, dst / OBSERVER / f)
 
 
-def compose_yaml(name: str, port: int, *, image: str | None, env: dict, volumes: list[str], bind_ip: str | None,
-                 command: list[str] | None = None, extra_volumes: dict | None = None) -> dict:
-    service: dict = {}
-    if image:
-        service["image"] = image
-    else:
-        service["build"] = {"context": "./source", "dockerfile": "node/Dockerfile"}
-        service["image"] = "medchain-node:latest"
-    if command:
-        service["command"] = command
-    service.update(environment=env, volumes=volumes,
-                   ports=[f"{bind_ip}:{port}:{port}" if bind_ip else f"{port}:{port}"], restart="unless-stopped")
-    return {"name": f"medchain-{name}", "services": {name: service}, "volumes": extra_volumes or {}}
-
-
-def copy_source(kit: Path) -> None:
-    for rel in SOURCE_FILES:
-        src, dst = ROOT / rel, kit / "source" / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if src.is_dir():
-            shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        else:
-            shutil.copyfile(src, dst)
-
-
 def fresh(out: Path, name: str, force: bool) -> Path:
     kit = out / name
     if kit.exists():
@@ -177,203 +248,170 @@ def fresh(out: Path, name: str, force: bool) -> Path:
     return kit
 
 
-def kit_readme(node_id: str, display: str, url: str, directory_url: str, port: int, secret: str, *,
-               image: str | None, observer_url: str | None, observer_db: str | None) -> str:
-    up = f"docker compose -f {COMPOSE_FILE} up -d{'' if image else ' --build'} --wait"
-    observer = (f"Training telemetry goes to the observer database at `{observer_db}` (read by the\n"
-                "MedChain dashboard). It only observes; training does not depend on it."
-                if observer_db else
-                f"Training telemetry is pushed to the observer at `{observer_url}` over HTTPS with\n"
-                f"its token (`pki/{OBSERVER}/token`), pinned to its key (`pki/{OBSERVER}/tls.crt`); the\n"
-                "MedChain dashboard reads it from there. This node never holds database credentials,\n"
-                "and training never waits for the observer.")
+def kit_readme(node_id: str, display: str, url: str, directory_url: str, port: int, secret: str,
+               observer_url: str) -> str:
     curl = f"curl --cacert pki/ca.crt https://localhost:{port}"
     return textwrap.dedent("""\
         # MedChain node kit: {display} (`{node_id}`)
 
-        This folder runs one MedChain hospital node on this machine. It trains on
-        `data/{node_id}.csv`, which never leaves this machine; only model updates
-        travel, only to this node's chain neighbours, over TLS, each one signed with
-        this node's key (`pki/{node_id}/signing.key`). There is no central training
-        server.
+        This folder runs one MedChain hospital node on this laptop. The step-by-step guide,
+        written for someone who has never used Docker, is docs/MULTI_LAPTOP.md in the
+        MedChain repository (the organiser can send it to you). The short version:
 
-        Where this node sits in the chain is decided by the MedChain directory at
-        `{directory_url}`: on start the node registers there with its own credential
-        (`pki/{node_id}/credential`), and the directory tells it, and its new
-        neighbours, who to connect to. The directory only coordinates membership. If it
-        is down, a node already in the chain keeps training; only joining and leaving
-        wait for it.
+        1. Install Docker Desktop and Tailscale, and join the organiser's tailnet.
+        2. Open `.env` in a text editor and check `NODE_ID` and the addresses
+           (`ADVERTISE_ADDR`, `DIRECTORY_URL`, `OBSERVER_URL`) against what the organiser told you.
+        3. In a terminal, in this folder:
+
+           ```sh
+           {up} up -d
+           {up} exec node python scripts/preflight.py
+           {up} logs -f
+           ```
+
+        The node trains on `data/{node_id}.csv`, which never leaves this laptop; only model
+        updates travel, only to this node's chain neighbours, over TLS, each signed with
+        this node's key (`pki/{node_id}/signing.key`). Its place in the chain comes from
+        the directory at `{directory_url}`; its telemetry goes to the observer at
+        `{observer_url}`. Training never waits for either of them.
 
         This kit contains this hospital's private keys, its directory credential and the
-        network's shared secret. Treat it like a password: send it to {display}'s
-        operator only, over a private channel.
+        network's shared secret. Treat it like a password.
 
-        ## Before you start
-
-        - Docker with the Compose v2 plugin.
-        - Port {port} free on this machine, and reachable at `{url}` from the other
-          hospitals and the directory. The simplest way is a private mesh network such as
-          Tailscale on every machine: it works through NAT and needs no port forwarding.
-          Peers pin this node's TLS key (registered with the directory), not its address.
-        - To train on your own patients instead of the demo slice, replace
-          `data/{node_id}.csv` with a file that has the same columns.
-
-        ## Run (this is also how the hospital joins)
-
-        ```sh
-        {up}
-        ```
-
-        The node registers with the directory. If a training run is in progress, the
-        directory appends this hospital at the end of the chain from a round boundary a
-        few rounds ahead; it then exchanges one full model snapshot with its new
-        neighbour and joins the run. Check it is up and placed:
+        ## Check it
 
         ```sh
         {curl}/health
         {curl}/status      # chain, position, head/tail group, neighbours
         ```
 
-        ## Start training
-
-        Once the hospitals are up, start a run from any one of them; it floods the
-        start to the others:
+        ## Start training (any one hospital; it floods to the others)
 
         ```sh
-        {curl}/round/start -X POST \\
-          -H 'Content-Type: application/json' \\
-          -H 'X-MedChain-Secret: {secret}' \\
-          -d '{{}}'
-        {curl}/metrics    # per-round loss and neighbours heard
+        {curl}/round/start -X POST -H 'Content-Type: application/json' \\
+          -H 'X-MedChain-Secret: {secret}' -d '{{}}'
         ```
 
-        {observer}
-
-        ## Leave the chain (planned)
+        ## Leave the chain, then stop
 
         ```sh
-        docker compose -f {COMPOSE_FILE} exec {node_id} python -m node.leave
+        {up} exec node python -m node.leave
+        {up} down
         ```
 
-        The directory takes this hospital out at the next round boundary and tells its
-        two neighbours, which bridge directly to each other (a new link, a fresh
-        snapshot exchange) so the chain heals instead of splitting. Then stop the node.
-        (Stopping it without leaving is treated as a crash: its neighbours skip it and
-        wait for it to come back.)
+        The directory takes this hospital out at the next round boundary and its two
+        neighbours bridge to each other. Stopping without leaving counts as a crash: the
+        neighbours skip it and wait for it to come back. `data/` keeps its checkpoints.
 
-        ## Stop
+        ## Switching to a phone hotspot
 
-        ```sh
-        docker compose -f {COMPOSE_FILE} down        # add -v to also delete this node's checkpoints
-        ```
-
-        ## If an address changes
-
-        Override it without touching the config by adding to the `environment:` block in
-        `{COMPOSE_FILE}`:
-
-        ```yaml
-              {ADVERTISE}: https://new-address-of-{node_id}:{port}
-              {DIRECTORY_ENV}: https://new-address-of-the-directory:PORT
-        ```
-
-        Then run the `up` command again; the node re-registers its new address and the
-        directory passes it to its neighbours. Other hospitals pin this node's TLS key,
-        not its address, so their links keep working. Only the dashboard checks the
-        address: for it, ask whoever provisioned the network to re-run
-        `scripts/provision.py` for this hospital with the new address (same key).
-        """).format(display=display, node_id=node_id, url=url, directory_url=directory_url, port=port, up=up,
-                    curl=curl, secret=secret, observer=observer, ADVERTISE=ADVERTISE_URL_ENV,
-                    DIRECTORY_ENV=DIRECTORY_URL_ENV, COMPOSE_FILE=COMPOSE_FILE)
+        Edit only `.env`: comment out the three Tailscale address lines and fill in the
+        hotspot block (this laptop's hotspot IP, and the hub's), then run the `up` command
+        again. Peers pin this node's TLS key, not its address, so nothing else changes.
+        This node is reachable at `{url}` on Tailscale.
+        """).format(display=display, node_id=node_id, url=url, directory_url=directory_url, port=port, up=UP,
+                    curl=curl, secret=secret, observer_url=observer_url)
 
 
 def build_kit(node_id: str, url: str, out: Path, *, directory_url: str, pki_dir: Path, secret: str, data: Path,
-              template: Path, image: str | None, observer_url: str, observer_db: str | None, bind_ip: str | None,
-              make_zip: bool, force: bool) -> Path:
+              template: Path, image: str | None, observer_url: str, make_zip: bool, force: bool) -> Path:
     kit = fresh(out, node_id, force)
-    (kit / "config").mkdir()
-    (kit / "data").mkdir()
-    cfg = node_yaml(node_id, url, directory_url, secret, template, None if observer_db else observer_url)
-    cfg_path = kit / "config" / f"{node_id}.yaml"
-    cfg_path.write_text(f"# MedChain node config for {node_id}, generated by scripts/provision.py.\n"
-                        + yaml.safe_dump(cfg, sort_keys=False))
-    load_config(cfg_path)  # the same validation the node runs at start
+    for d in ("deploy", "config", "data"):
+        (kit / d).mkdir()
+    shutil.copyfile(NODE_COMPOSE, kit / "deploy" / "node.yml")
+    port = listen_port(node_id, url, template)
+    cfg = engine_yaml(node_id, template)
+    (kit / "config" / "node.yaml").write_text(
+        f"# {node_id}'s name and engine settings, generated by scripts/provision.py. Where it runs, its keys\n"
+        "# and the network secret are in ../.env (node/settings.py lists every variable).\n"
+        + yaml.safe_dump(cfg, sort_keys=False))
+    env = node_env(node_id, port, url, directory_url, observer_url, secret, image)
+    (kit / ".env").write_text(env)
+    check_kit(kit, read_env(env))  # the same validation the node runs at start
     shutil.copyfile(data, kit / "data" / f"{node_id}.csv")
     copy_keys(pki_dir, kit, node_id)
-
-    port = cfg["port"]
-    env = {"NODE_CONFIG": f"/config/{node_id}.yaml"} | ({"DATABASE_URL": observer_db} if observer_db else {})
-    compose = compose_yaml(node_id, port, image=image, env=env, bind_ip=bind_ip,
-                           volumes=[f"./config/{node_id}.yaml:/config/{node_id}.yaml:ro",
-                                    f"./data/{node_id}.csv:/data/{node_id}.csv:ro", "./pki:/pki:ro",
-                                    "checkpoints:/checkpoints"], extra_volumes={"checkpoints": {}})
-    (kit / COMPOSE_FILE).write_text(
-        f"# Runs only {node_id}. See README.md:  docker compose -f {COMPOSE_FILE} up -d{'' if image else ' --build'} --wait\n"
-        + yaml.safe_dump(compose, sort_keys=False))
     (kit / "README.md").write_text(kit_readme(node_id, str(cfg["display_name"]), url, directory_url, port, secret,
-                                              image=image, observer_url=observer_url, observer_db=observer_db))
-    if not image:
-        copy_source(kit)
+                                              observer_url))
     if make_zip:
         shutil.make_archive(str(out / node_id), "zip", root_dir=out, base_dir=node_id)
     return kit
 
 
-def build_directory_kit(url: str, out: Path, *, pki_dir: Path, observer_url: str, image: str | None,
+def hub_env(kit: Path, directory_url: str, observer_url: str, secret: str, image: str | None,
+            bind_ip: str | None) -> str:
+    """The directory kit's `hub.env` for deploy/hub.yml, laid out like deploy/hub.env.example."""
+    repo, version = split_image(image)
+    host = urlsplit(directory_url).hostname or ""
+    try:
+        tailscale_ip = host if ipaddress.ip_address(host) in TAILSCALE else None
+    except ValueError:
+        tailscale_ip = None
+    kit_path = "./" + os.path.relpath(kit.resolve(), ROOT) if kit.resolve().is_relative_to(ROOT) else str(kit.resolve())
+    tailscale = (f"HUB_BIND_IP={bind_ip}" if bind_ip else f"HUB_BIND_IP={tailscale_ip}" if tailscale_ip else
+                 "# (the directory's address is not a Tailscale IP: put `tailscale ip -4` here to listen on the\n"
+                 "# tailnet only)\nHUB_BIND_IP=0.0.0.0")
+    return textwrap.dedent(f"""\
+        # MedChain hub settings, generated by scripts/provision.py. From the repository root: make hub
+        # (deploy/hub.yml; docs/MULTI_LAPTOP.md walks through it).
+
+        # This directory kit (its config/ and pki/): ./ and relative to the repo root, or absolute
+        HUB_KIT={kit_path}
+        # The network's shared secret (the dashboard's Start / Pause relay sends it)
+        MEDCHAIN_SHARED_SECRET={secret}
+        IMAGE_VERSION={version}
+        """) + (f"MEDCHAIN_IMAGE={repo}\n" if repo else "") + textwrap.dedent(f"""\
+        # The ports in the directory's and the observer's addresses
+        DIRECTORY_PORT={urlsplit(directory_url).port or 443}
+        OBSERVER_PORT={urlsplit(observer_url).port or OBSERVER_PORT}
+        # The dashboard, on this laptop only: http://localhost:8080
+        DASHBOARD_BIND_IP=127.0.0.1
+        DASHBOARD_PORT=8080
+
+        # ======== Tailscale (the normal way) ========
+        # Listen for the hospitals on this laptop's Tailscale IP only. 0.0.0.0 (every interface) also works.
+        """) + tailscale + textwrap.dedent("""
+
+        # ======== Phone hotspot (fallback) ========
+        # To switch: put a # in front of the Tailscale line above and remove it below. The hotspot
+        # hands out addresses that can change, so listen on every interface.
+        #HUB_BIND_IP=0.0.0.0
+        """)
+
+
+def build_directory_kit(url: str, out: Path, *, pki_dir: Path, observer_url: str, secret: str, image: str | None,
                         bind_ip: str | None, make_zip: bool, force: bool) -> Path:
     kit = fresh(out, DIRECTORY, force)
     (kit / "config").mkdir()
-    port = urlsplit(url).port or 8100
+    port = urlsplit(url).port or 443
     cfg = yaml.safe_load((ROOT / "config" / "directory.yaml").read_text())
     cfg.update(port=port, host="0.0.0.0", db_path="/data/directory.sqlite")
     (kit / "config" / "directory.yaml").write_text("# MedChain directory config, generated by scripts/provision.py.\n"
                                                    + yaml.safe_dump(cfg, sort_keys=False))
     copy_keys(pki_dir, kit, DIRECTORY)
-    compose = compose_yaml(DIRECTORY, port, image=image, env={"DIRECTORY_CONFIG": "/config/directory.yaml"},
-                           bind_ip=bind_ip, command=["python", "-m", "directory"],
-                           volumes=["./config/directory.yaml:/config/directory.yaml:ro", "./pki:/pki:ro",
-                                    "directory-data:/data"], extra_volumes={"directory-data": {}})
-    (kit / COMPOSE_FILE.replace("hospital", "directory")).write_text(
-        "# Runs the MedChain membership directory. See README.md.\n" + yaml.safe_dump(compose, sort_keys=False))
+    (kit / "hub.env").write_text(hub_env(kit, url, observer_url, secret, image, bind_ip))
     (kit / "README.md").write_text(textwrap.dedent(f"""\
-        # MedChain directory kit
+        # MedChain hub kit (directory + observer)
 
-        Runs the membership directory at `{url}`. It decides where each hospital sits in
-        the chain and tells hospitals who to connect to when one joins or leaves. It
-        never receives model weights and never runs or influences training. It is a
-        single point of failure for joins and leaves only: if it is down, hospitals
-        already in the chain keep training.
+        The organiser's laptop runs the hub from the MedChain repository, with this kit's
+        settings (`hub.env`):
 
         ```sh
-        docker compose -f docker-compose.directory.yaml up -d{'' if image else ' --build'} --wait
+        make hub    # = docker compose --project-directory . --env-file {os.path.relpath(kit / "hub.env", ROOT) if kit.resolve().is_relative_to(ROOT) else kit / "hub.env"} -f deploy/hub.yml up -d --wait
         ```
 
-        Its state lives in its own SQLite file (the `directory-data` volume), separate
-        from the dashboard's Postgres. `pki/directory/hospitals.yaml` lists which
-        hospitals may register (an id and the SHA-256 of that hospital's own
-        credential, in placement order). It is re-read on every registration: to admit
-        a new hospital, replace it with the refreshed file from the provisioning machine.
-        Keep `pki/directory/signing.key` private: it signs every membership document.
+        - The directory, at `{url}`, decides where each hospital sits in the chain and
+          tells hospitals who to connect to when one joins or leaves. It never receives
+          model weights. If it is down, hospitals already in the chain keep training.
+        - The observer, at `{observer_url}`, takes the hospitals' pushed telemetry into
+          Postgres for the dashboard (http://localhost:8080). Training never waits for it.
+        - Postgres listens on this laptop's loopback only.
 
-        ## The observer
-
-        The hospitals push their telemetry to the observer at `{observer_url}`, which
-        writes it to the dashboard's Postgres. This kit holds its TLS certificate and key
-        (`pki/observer/`, which the hospitals pin) and its ingest token
-        (`pki/observer/token`, also in every hospital kit). Run it on this machine next
-        to Postgres, from the node image or `source/`:
-
-        ```sh
-        OBSERVER_PORT={urlsplit(observer_url).port or OBSERVER_PORT} OBSERVER_TOKEN_FILE=pki/observer/token \\
-          TLS_CERT=pki/observer/tls.crt TLS_KEY=pki/observer/tls.key TLS_CA=pki/ca.crt \\
-          DATABASE_URL=postgresql://medchain:medchain@127.0.0.1:5432/medchain \\
-          PYTHONPATH=source python -m observer
-        ```
-
-        Keep `pki/observer/tls.key` private. Training never waits for the observer.
+        `pki/directory/hospitals.yaml` lists which hospitals may register (an id and the
+        SHA-256 of that hospital's credential, in placement order). It is re-read on
+        every registration: to admit a new hospital, replace it with the refreshed file
+        from the provisioning run. Keep `pki/directory/signing.key` (it signs every
+        membership document) and `pki/observer/tls.key` private.
         """))
-    if not image:
-        copy_source(kit)
     if make_zip:
         shutil.make_archive(str(out / DIRECTORY), "zip", root_dir=out, base_dir=DIRECTORY)
     return kit
@@ -393,12 +431,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="this hospital's data CSV (repeatable; default: data/slices/<id>.csv)")
     ap.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE,
                     help="engine settings for a hospital without its own config/<id>.yaml")
-    ap.add_argument("--image", help="use this prebuilt node image instead of bundling the build context")
+    ap.add_argument("--image", help=f"the node image, repo[:tag] (default: the published "
+                                    f"ghcr.io/denimworld12/medchain-node:{IMAGE_VERSION})")
     ap.add_argument("--observer", help="the observer's address, host:port (https; default: the directory's host, "
                                        f"port {OBSERVER_PORT})")
     ap.add_argument("--observer-token", help="the observer's ingest token (default: the network's, else a new one)")
-    ap.add_argument("--observer-db", help="fallback: postgresql:// URL the nodes write to directly instead of the observer")
-    ap.add_argument("--bind-ip", help="publish the port on this host IP only (e.g. the machine's Tailscale IP)")
+    ap.add_argument("--bind-ip", help="the hub listens for the hospitals on this IP only (HUB_BIND_IP in hub.env; "
+                                      "default: the directory's address when it is a Tailscale IP)")
     ap.add_argument("--zip", action="store_true", help="also write <out>/<id>.zip for each kit")
     ap.add_argument("--force", action="store_true", help="replace kits that already exist")
     args = ap.parse_args(argv)
@@ -432,12 +471,11 @@ def main(argv: list[str] | None = None) -> int:
         for h in hospitals:
             kit = build_kit(h, peers[h], args.out, directory_url=directory_url, pki_dir=pki_dir, secret=secret,
                             data=data[h], template=args.template, image=args.image, observer_url=observer_url,
-                            observer_db=args.observer_db,
-                            bind_ip=args.bind_ip, make_zip=args.zip, force=args.force)
+                            make_zip=args.zip, force=args.force)
             print(f"{h}: {kit}{' (+ ' + kit.name + '.zip)' if args.zip else ''}")
         if DIRECTORY in wanted:
             kit = build_directory_kit(directory_url, args.out, pki_dir=pki_dir, observer_url=observer_url,
-                                      image=args.image,
+                                      secret=secret, image=args.image,
                                       bind_ip=args.bind_ip, make_zip=args.zip, force=args.force)
             print(f"{DIRECTORY}: {kit}{' (+ directory.zip)' if args.zip else ''}")
         else:

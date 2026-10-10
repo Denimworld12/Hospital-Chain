@@ -1,0 +1,123 @@
+name: Node image
+
+# The multi-arch node image deploy/node.yml and deploy/hub.yml run:
+#   ghcr.io/denimworld12/medchain-node:<tag>   linux/amd64 + linux/arm64, IMAGE_VERSION=<tag> baked in
+# Published when a release tag is pushed (git tag v1.0.0 && git push origin v1.0.0) or run by hand
+# (Actions > Node image > Run workflow, with the tag). Pull requests that touch the image only build
+# it, on both architectures, without publishing.
+#
+# Each architecture builds on its own native runner (ubuntu-24.04-arm for arm64): the image trains the
+# risk model and installs torch at build time, which is very slow under QEMU emulation. Each job
+# pushes its image by digest, then `merge` ties the two into one tag.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "the tag to publish, e.g. v1.0.0"
+        required: true
+        default: v1.0.0
+  pull_request:
+    paths:
+      - node/Dockerfile
+      - node/requirements.txt
+      - .github/workflows/image.yml
+
+env:
+  IMAGE: ghcr.io/denimworld12/medchain-node
+  VERSION: ${{ github.event.inputs.version || (github.ref_type == 'tag' && github.ref_name) || format('pr-{0}', github.event.pull_request.number) }}
+  PUBLISH: ${{ github.event_name != 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: platform slug
+        run: echo "SLUG=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+      - uses: docker/setup-buildx-action@v3
+      - if: env.PUBLISH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: node/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: IMAGE_VERSION=${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: ${{ env.PUBLISH == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || 'type=cacheonly' }}
+          cache-from: type=gha,scope=node-${{ env.SLUG }}
+          cache-to: type=gha,mode=max,scope=node-${{ env.SLUG }}
+      - if: env.PUBLISH == 'true'
+        name: export digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+      - if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ env.SLUG }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: publish ${{ github.event.inputs.version || github.ref_name }}
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: tag both architectures as ${{ env.VERSION }}
+        working-directory: /tmp/digests
+        run: |
+          sources=()
+          for digest in *; do sources+=("$IMAGE@sha256:$digest"); done
+          docker buildx imagetools create -t "$IMAGE:$VERSION" "${sources[@]}"
+      - name: check it
+        run: |
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+          docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Manifests}}' \
+            | grep -q '"architecture":"arm64"'

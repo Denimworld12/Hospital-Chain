@@ -21,8 +21,15 @@ COPY node /app/node
 COPY directory /app/directory
 COPY observer /app/observer
 COPY scripts/pki.py /app/scripts/pki.py
+# run inside a node's container: docker compose ... exec node python scripts/preflight.py
+COPY scripts/preflight.py /app/scripts/preflight.py
 COPY models/ecg-resnet18.onnx /app/models/ecg-resnet18.onnx
 COPY --from=risk-model /app/models/heart-risk.joblib /app/models/heart-risk.joblib
+# the release this image was built as (.github/workflows/image.yml), reported by /health
+ARG IMAGE_VERSION=dev
+ENV IMAGE_VERSION=${IMAGE_VERSION}
+LABEL org.opencontainers.image.version=${IMAGE_VERSION} \
+      org.opencontainers.image.source=https://github.com/Denimworld12/Hospital-Chain
 # No training data, no config and no keys baked in: docker-compose mounts this node's
 # own config, only this node's own data slice, and the keys from scripts/pki.py.
 # The healthcheck is local liveness only (127.0.0.1), so it skips certificate checks.

@@ -148,12 +148,16 @@ def peer_url_env(node_id: str) -> str:
     return f"MEDCHAIN_PEER_{re.sub(r'[^A-Za-z0-9]+', '_', node_id).upper()}_URL"
 
 
+# the repository's models/ (in the image, /app/models): the same default in Docker and for `make node-native`
+MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
+
+
 @dataclass(frozen=True)
 class AssessConfig:
     """Model files for the per-patient risk assessment endpoints (inference only)."""
 
-    tabular_model: str = "/app/models/heart-risk.joblib"
-    ecg_model: str = "/app/models/ecg-resnet18.onnx"
+    tabular_model: str = str(MODELS_DIR / "heart-risk.joblib")
+    ecg_model: str = str(MODELS_DIR / "ecg-resnet18.onnx")
 
 
 @dataclass(frozen=True)

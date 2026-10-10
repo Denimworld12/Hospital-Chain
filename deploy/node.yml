@@ -1,0 +1,48 @@
+# One MedChain hospital node: the file a hospital's laptop runs (docs/MULTI_LAPTOP.md).
+#
+# Run it from the folder that holds `.env`, `pki/`, `data/` and `config/` (an unzipped kit
+# from scripts/provision.py):
+#
+#   docker compose --project-directory . -f deploy/node.yml up
+#
+# `--project-directory .` makes `.env`, `./data`, `./pki` and `./config` mean the kit's
+# folders (Compose otherwise resolves them next to this file). From a repo checkout,
+# `make node KIT=kits/hospital-b` runs the same thing.
+#
+# Everything about this hospital and the network comes from `.env` (node/settings.py lists
+# every variable). The node publishes NODE_PORT on every interface of this machine, and
+# that same NODE_PORT is the port it binds inside the container and the one it advertises,
+# so the three can never disagree. Neighbours, the directory and the observer are reached
+# at the addresses in `.env` and the directory's documents: there is no container name and
+# no Compose network DNS in any of them.
+
+name: medchain-${NODE_ID:?set NODE_ID in .env, and run from your kit folder with --project-directory .}
+
+services:
+  node:
+    image: ${MEDCHAIN_IMAGE:-ghcr.io/denimworld12/medchain-node}:${IMAGE_VERSION:-v1.0.0}
+    env_file: .env
+    # where the kit's files are inside the container (these win over `.env`)
+    environment:
+      NODE_CONFIG: /config/node.yaml
+      DATA_PATH: ${DATA_PATH:-/data}
+      TLS_CERT: /pki/${NODE_ID}/tls.crt
+      TLS_KEY: /pki/${NODE_ID}/tls.key
+      TLS_CA: /pki/ca.crt
+      SIGNING_KEY: /pki/${NODE_ID}/signing.key
+      DIRECTORY_CREDENTIAL_FILE: /pki/${NODE_ID}/credential
+      DIRECTORY_PUBLIC_KEY: file:/pki/directory/signing.pub
+      DIRECTORY_TLS_PIN: file:/pki/directory/tls.crt
+      OBSERVER_TOKEN_FILE: /pki/observer/token
+      OBSERVER_TLS_PIN: file:/pki/observer/tls.crt
+    volumes:
+      # this hospital's data slice, checkpoints, saved membership and audit.db
+      - ./data:${DATA_PATH:-/data}
+      - ./pki:/pki:ro
+      - ./config:/config:ro
+    ports:
+      - "${NODE_PORT:?set NODE_PORT in .env}:${NODE_PORT}"
+    # Docker Desktop's DNS cannot always resolve Tailscale MagicDNS names (*.ts.net) inside a
+    # container. If the preflight or the logs say a .ts.net name does not resolve, use the
+    # Tailscale IPs (100.x.y.z) in `.env` instead.
+    restart: unless-stopped
