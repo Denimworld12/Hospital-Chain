@@ -11,6 +11,9 @@ Endpoints
     GET  /metrics         this node's per-round metrics for the current/last run
     GET  /membership      my current (and scheduled) membership documents, as the directory signed them
     POST /membership      take a directory-signed membership document (from the directory or a peer)
+    POST /membership/rejoin
+                          a restarted neighbour asks to rejoin from its saved chain while the directory
+                          is down; accepted only for an unchanged chain epoch and its pinned TLS key
     POST /membership/leave
                           planned departure: ask the directory to take me out of the chain at the next
                           round boundary, and tell my neighbours so they bridge to each other
@@ -37,7 +40,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from . import discovery, pinning, security, wire
+from . import discovery, pinning, rejoin, security, wire
 from .assess.routes import Assessor, build_router as build_assess_router
 from .config import NodeConfig, load_config
 from .db import Database, NullDatabase
@@ -56,6 +59,11 @@ class StartRequest(BaseModel):
     rounds: int | None = Field(default=None, ge=1, le=500)
     origin: str | None = None
     initiated_by: str | None = None
+
+
+class RejoinRequest(BaseModel):
+    node_id: str
+    epoch: int
 
 
 class ControlRequest(BaseModel):
@@ -128,21 +136,55 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             log.info("membership epoch %d via %s: %s", doc.epoch, via, outcome)
         return outcome
 
+    async def rejoin_from_saved(r: Runner) -> str:
+        """The directory is down: offer my saved chain to my saved neighbours (node/rejoin.py)."""
+        reason = rejoin.check_self(cfg, r.saved, r.public_key)
+        if reason:
+            attempt = rejoin.Attempt("unusable", reason=reason)
+        else:
+            attempt = await rejoin.ask_neighbours(r.client, cfg, r.saved)
+        if attempt.outcome != "unreachable":
+            db.audit(node_id=cfg.node_id, event=f"rejoin_{attempt.outcome}",
+                     detail={"epoch": attempt.epoch, "neighbours": attempt.answers, "reason": attempt.reason})
+        if attempt.outcome == "accepted":
+            log.warning("directory unreachable; my neighbours accepted my saved chain (epoch %d): rejoining",
+                        attempt.epoch)
+            docs, r.saved = r.saved, []
+            for doc in docs:
+                take_membership(doc, "saved membership, accepted by my neighbours")
+        elif attempt.outcome in ("refused", "unusable"):
+            log.warning("cannot rejoin from my saved chain (%s); waiting for the directory",
+                        attempt.reason or attempt.answers)
+            r.saved = []
+        return attempt.outcome
+
     async def register_with_directory(r: Runner) -> None:
-        """Register (retrying while the directory is unreachable), then join or rejoin the chain's run."""
-        joined, doc = False, None
+        """Register (retrying while the directory is unreachable), then join or rejoin the chain's run.
+
+        While the directory is unreachable, a restarted node may rejoin from its saved chain if its
+        neighbours vouch that the chain is unchanged; it keeps registering in the background either way."""
+        joined, doc, rejoined = False, None, False
+        r.saved = rejoin.load(r.state_file, directory_key) if r.state_file and directory_key else []
         delay = 1.0
         while doc is None:
             try:
                 doc, joined = await discovery.register(r.client, cfg, r.public_key, trainer.n_patients, r.tls_pin)
+                break
             except discovery.DirectoryError as exc:
                 if pinning.is_pin_error(exc):
                     db.audit(node_id=cfg.node_id, event="tls_pin_mismatch", receiver="directory",
                              detail={"reason": str(exc.__cause__ or exc)})
                 log.warning("directory registration failed (%s); retrying in %.0fs", exc, delay)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 15.0)
+            if r.saved and await rejoin_from_saved(r) == "accepted":
+                rejoined = True
+                if cfg.is_admm and r.in_chain:
+                    await r.rejoin()
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 15.0)
+        r.saved = []
         take_membership(doc, "directory registration")
+        if rejoined:
+            return
         if joined and doc.run_id and doc.effective_round and r.in_chain:
             outcome = await r.join_run(doc)
             log.info("join of run %s: %s", doc.run_id, outcome)
@@ -417,6 +459,30 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             raise HTTPException(400, detail=str(exc))
         outcome = take_membership(doc, request.headers.get(wire.H_SENDER) or "push")
         return {"status": outcome, "node_id": cfg.node_id, "epoch": runner().known_epoch}
+
+    @app.post("/membership/rejoin", dependencies=peer_only)
+    async def membership_rejoin(req: RejoinRequest, request: Request):
+        """A restarted neighbour asks to rejoin from its saved chain while the directory is down (node/rejoin.py).
+
+        Accepted only if (a) it presents my latest epoch (the chain has not changed since it went down) and
+        (b) it connects with the TLS key the directory has on record for it."""
+        r = runner()
+        if cfg.directory is None:
+            raise HTTPException(409, detail=f"{cfg.node_id} has a static chain (no directory configured)")
+        member = r.peer(req.node_id)
+        if member is None or request.headers.get(wire.H_SENDER) != req.node_id:
+            raise HTTPException(403, detail=f"{req.node_id} is not a neighbour of {cfg.node_id} in its chain")
+        require_caller(request, req.node_id, member, r.run_id, r.current_round)
+        if req.epoch != r.known_epoch:
+            reason = (f"the chain changed while {req.node_id} was away: it presents epoch {req.epoch}, {cfg.node_id} "
+                      f"is at epoch {r.known_epoch}; wait for the directory")
+            db.audit(node_id=cfg.node_id, event="rejoin_refused", run_id=r.run_id, round_num=r.current_round,
+                     sender=req.node_id, receiver=cfg.node_id, detail={"reason": reason, "presented": req.epoch,
+                                                                        "epoch": r.known_epoch})
+            raise HTTPException(409, detail=reason)
+        db.audit(node_id=cfg.node_id, event="rejoin_accepted", run_id=r.run_id, round_num=r.current_round,
+                 sender=req.node_id, receiver=cfg.node_id, detail={"epoch": req.epoch})
+        return {"status": "accepted", "node_id": cfg.node_id, "epoch": r.known_epoch}
 
     @app.post("/membership/leave", dependencies=peer_only)
     async def membership_leave():

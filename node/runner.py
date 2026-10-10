@@ -28,7 +28,7 @@ from typing import Mapping
 
 import httpx
 
-from . import pinning, security, wire
+from . import pinning, rejoin, security, wire
 from .config import Neighbour, NodeConfig
 from .engine import Engine, NeighborUpdate, UpdatePackage
 from .membership import Member, Membership, link_key
@@ -90,6 +90,8 @@ class Runner:
         self.history: list[RoundMetrics] = []
         self.membership: Membership | None = None
         self._pending: list[Membership] = []
+        self.saved: list[Membership] = []  # signed documents from before a restart, while neighbours vet a rejoin
+        self.state_file = rejoin.state_path(cfg) if cfg.directory else None
         self.epoch_start_round: int | None = None  # round the current membership took effect in this run
         self.neighbours: tuple[Neighbour, ...] = ()
         self.neighbour_status: dict[str, str] = {}
@@ -135,7 +137,8 @@ class Runner:
     def known_parties(self) -> list[tuple[str, str, str, str | None]]:
         """(id, label, url, TLS pin) of every member of my current and scheduled chains: whom I may dial."""
         return [(m.id, m.display_name or m.id, m.url, m.tls_pin)
-                for doc in [*reversed(self._pending), self.membership] if doc for m in doc.members.values()]
+                for doc in [*reversed(self._pending), self.membership, *reversed(self.saved)] if doc
+                for m in doc.members.values()]
 
     def _set_membership(self, doc: Membership) -> None:
         self.membership = doc
@@ -148,6 +151,15 @@ class Runner:
         """Take a (verified) membership document: apply it now, or schedule it for its round boundary."""
         if doc.epoch <= self.known_epoch:
             return "stale"
+        outcome = self._offer(doc)
+        if self.state_file:  # survives a restart, for rejoining without the directory (node/rejoin.py)
+            try:
+                rejoin.save(self.state_file, [d for d in [self.membership, *self._pending] if d])
+            except OSError as exc:
+                log.warning("could not save membership to %s: %s", self.state_file, exc)
+        return outcome
+
+    def _offer(self, doc: Membership) -> str:
         only_addresses = not self._pending and self.membership is not None and doc.same_chain(self.membership)
         if not self.active or only_addresses:
             for d in [*self._pending, doc]:  # nothing is in flight (or only addresses changed): apply now

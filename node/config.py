@@ -145,6 +145,7 @@ class NodeConfig:
     checkpoint_every: int = 5
     checkpoint_dir: str = "/checkpoints"
     seed: int = 42
+    data_path: str | None = None  # node state that must survive a restart (saved membership); default checkpoint_dir
     training: TrainingConfig = field(default_factory=TrainingConfig)
     timing: TimingConfig = field(default_factory=TimingConfig)
     assess: AssessConfig = field(default_factory=AssessConfig)
@@ -162,6 +163,10 @@ class NodeConfig:
     @property
     def is_admm(self) -> bool:
         return self.engine in ADMM_ENGINES
+
+    @property
+    def state_dir(self) -> str:
+        return self.data_path or self.checkpoint_dir
 
 
 def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
@@ -227,6 +232,7 @@ def load_config(path: str | os.PathLike | None = None) -> NodeConfig:
         checkpoint_every=int(raw.get("checkpoint_every", 5)),
         checkpoint_dir=str(raw.get("checkpoint_dir", "/checkpoints")),
         seed=int(raw.get("seed", 42)),
+        data_path=str(raw["data_path"]) if raw.get("data_path") else None,
         training=TrainingConfig(**(raw.get("training") or {})),
         timing=TimingConfig(**(raw.get("timing") or {})),
         assess=AssessConfig(**(raw.get("assess") or {})),

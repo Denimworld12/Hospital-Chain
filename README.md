@@ -415,6 +415,24 @@ training**: nothing in a node's round loop calls it, so if it goes down, the
 hospitals already in the chain keep training uninterrupted (tested), and only
 joining and leaving wait for it to come back.
 
+A hospital that **restarts** while the directory is down (a crash, a laptop
+reboot) can still rejoin. Every node saves the directory-signed membership
+documents it holds to its data directory (`data_path`, default the checkpoint
+directory). The chain epoch in them goes up on every join, leave (bridge) and
+re-registration. On restart, if the directory is unreachable, the node offers
+its saved chain to its saved neighbours (`POST /membership/rejoin`, over pinned
+TLS). A neighbour accepts only if:
+
+- the epoch it presents is the neighbour's own latest epoch, so the chain has not
+  changed; and
+- the node connects with the TLS key on record for it.
+
+If either check fails, the node waits for the directory, as before, and never
+trusts stale state (tested both ways). In the Step 0 reproduction (A-B-C, the
+directory stopped and B killed and restarted at round 12), A used to run to
+the 400-round limit with 381 rounds degraded. It now reaches consensus at
+round 86 with 17 degraded.
+
 - It never sees model weights and never runs or influences training. Members'
   public `GET /status` (run id, round, agreed stop) is all it reads, to pick the
   round boundary for a change.
@@ -873,9 +891,11 @@ kill and checkpoint rejoin; four and five nodes (head/tail alternation, every li
 every round, consensus); and, through the directory over TLS with signed updates,
 a fourth hospital joining a running chain of three, a middle hospital of four
 leaving with its neighbours bridging, a crash that changes no membership, the
-directory going down mid-run, rejected tampered, unsigned, foreign-key, replayed
+directory going down mid-run, a restart while the directory is down (rejoin
+accepted for an unchanged chain, refused for a changed chain or a changed TLS
+key), TLS key pinning on both ends, rejected tampered, unsigned, foreign-key, replayed
 and unknown-sender updates, forged membership documents and bad credentials
-(`test_chain_n.py`, `test_membership.py`). It also covers the risk-assessment
+(`test_chain_n.py`, `test_membership.py`, `test_rejoin.py`, `test_pinning.py`). It also covers the risk-assessment
 endpoints, the address overrides, the provisioning kits and three nodes as
 separate OS processes on the host's network address, checked by
 `scripts/verify_multihost.py`. `dashboard/server/snapshot.test.js` covers the
