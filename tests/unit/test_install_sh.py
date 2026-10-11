@@ -42,7 +42,7 @@ def run_installer(tmp_path, **env):
             "MEDCHAIN_DIR": str(tmp_path / "MedChain"), "MEDCHAIN_HUB": "100.101.1.99",
             "ENROLLED_ID": "st-marys-3f9a", **env}
     r = subprocess.run(["bash", str(ROOT / "deploy/install/install.sh")], env=full, stdin=subprocess.DEVNULL,
-                       capture_output=True, text=True, timeout=60)
+                       start_new_session=True, capture_output=True, text=True, timeout=60)
     return r, log.read_text() if log.exists() else ""
 
 
@@ -61,3 +61,11 @@ def test_an_unattended_install_reports_why_enrollment_failed(tmp_path):
     assert r.returncode == 1
     assert "Enrollment failed" in r.stderr and "No free name" not in r.stderr
     assert not any(c.startswith("docker compose") and "up -d" in c for c in calls.splitlines())
+
+
+def test_an_unattended_install_with_a_taken_name_stops_instead_of_asking(tmp_path):
+    r, calls = run_installer(tmp_path, MEDCHAIN_DISPLAY_NAME="St Mary's", MEDCHAIN_JOIN_CODE="ABCD-EFGH-JKMN-PQRS-TVWX",
+                             ENROLL_EXIT="3")
+    assert r.returncode == 1
+    assert "That name is taken" in r.stderr and "MEDCHAIN_DISPLAY_NAME" in r.stderr
+    assert [c.split()[1] for c in calls.splitlines()].count("run") == 1
