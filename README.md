@@ -175,7 +175,7 @@ docker compose ps
 | --- | --- | --- |
 | `pki` (container `medchain-pki`) | - | Runs once on start: `scripts/pki.py` issues the demo network CA, each node's, the directory's and the observer's TLS certificate, each node's Ed25519 update-signing key and each hospital's directory credential into `./.pki/` (gitignored). Later starts keep what exists. |
 | `directory` | 8100 | The membership directory (`directory/`): decides where a hospital sits in the chain and tells hospitals who to connect to when one joins or leaves. Its own SQLite store, not Postgres. See [The directory](#the-directory). |
-| `hospital-a` ... `hospital-d` | 8001 ... 8004 | FastAPI node over HTTPS: `GET /health`, `GET /status`, `POST /round/start`, `POST /update`, `GET /snapshot`, `GET /metrics`, `GET`/`POST /membership`, `POST /membership/leave` (+ `POST /round/pause`, `/round/resume`, and the `POST /assess*` risk-assessment endpoints). All run the same image, and the mounted `config/hospital-*.yaml` decides which hospital it is and which engine it runs. Each node mounts only its own data slice. `hospital-d` (8004, the Swiss data) is the mid-demo joiner and only starts on request (profile `join`). `hospital-e` (8005) is a spare (profile `spare`). |
+| `hospital-a` ... `hospital-d` | 8001 ... 8004 | FastAPI node over HTTPS: `GET /health`, `GET /status`, `POST /round/start`, `POST /update`, `GET /snapshot`, `GET /metrics`, `GET`/`POST /membership`, `POST /membership/leave` (+ `POST /round/pause`, `/round/resume`, `/round/stop`, and the `POST /assess*` risk-assessment endpoints). All run the same image, and the mounted `config/hospital-*.yaml` decides which hospital it is and which engine it runs. Each node mounts only its own data slice. `hospital-d` (8004, the Swiss data) is the mid-demo joiner and only starts on request (profile `join`). `hospital-e` (8005) is a spare (profile `spare`). |
 | `observer` | 8200 | Takes the nodes' telemetry (`POST /ingest`, over HTTPS with its token; `observer/`) and writes it to Postgres with the same schema. Nodes push to it from a background queue, so training never waits for it. Nodes on other machines need only its URL and token, never Postgres credentials. |
 | `postgres` (container `medchain-postgres`) | 5432, loopback only | Holds `nodes`, `runs`, `rounds`, `updates_meta`, `metrics` and `audit_logs`. Only the observer writes it and only the dashboard reads it. |
 | `dashboard` | 8080 | Observer UI. It reads Postgres and pushes snapshots and update events over `/ws`. |
@@ -211,7 +211,7 @@ configured round limit (`training.rounds`, 400). Q-GADMM stops earlier, on the
 same round everywhere, once every edge's residual has stayed below epsilon for
 3 rounds (about round 70 for this three-hospital chain at b=2; a longer chain
 takes longer, which is expected). A request without the header gets `401`. The
-same header works for `POST /round/pause` and `POST /round/resume`.
+same header works for `POST /round/pause`, `POST /round/resume` and `POST /round/stop`.
 
 Once the run finishes, you can read any node's per-round history:
 
@@ -989,8 +989,8 @@ leaves, though not for training.
 - **Observer service and dashboard**: nodes push their telemetry to the observer
   (`observer/`, `POST /ingest`), which writes Postgres; the dashboard reads it.
   Neither coordinates training. The dashboard's buttons relay a
-  single start/pause request to one node in the chain, which floods it to the
-  others; it learns about each `/update` from the `updates_meta` rows the nodes
+  single start/pause/resume request to one node in the chain, which floods it to the
+  others (Stop goes to every alive node, so it gets past a dead one); it learns about each `/update` from the `updates_meta` rows the nodes
   report. Killing the dashboard does not affect a run (tested). It follows
   membership from what the nodes write: the topology page draws the current chain
   in order, the consensus panel shows only the current links and resets with each
