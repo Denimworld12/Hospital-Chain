@@ -710,7 +710,15 @@ keep working unchanged): a **join code**.
    the node checks it, the nonce, and that the TLS key that answered is the
    directory's, before trusting any of it.
 4. The node writes a kit folder with the same layout as a provisioned one, so
-   `deploy/node.yml` runs it. The secret goes to `pki/network/shared_secret`
+   `deploy/node.yml` runs it.
+
+On the hospital's laptop this is one command: `deploy/install/install.ps1` (Windows)
+or `deploy/install/install.sh` (macOS, Linux), fetched from the release tag. It checks
+Docker, Tailscale, the hub and disk space (each with a plain-English fix), asks for
+the name and the code, reads the Tailscale address, enrolls inside the published
+image (no Python, no checkout) and starts the node. Running it again keeps the
+enrollment. The dashboard's **JOIN CODES** page shows the command with the hub's
+address filled in (`HUB_ADDRESS`). The secret goes to `pki/network/shared_secret`
    (`SHARED_SECRET_FILE`): nobody types it, nothing prints it.
 
 **Names.** The person enrolling types the hospital's display name as free text; it

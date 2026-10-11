@@ -5,6 +5,25 @@ import { notAuthorized } from "../auth.js";
 // Join codes (directory/enroll.py): each one lets one hospital enroll itself, once, before it expires.
 // The full code is shown only right after it is created; the hub keeps only its hash.
 
+const RAW = "https://raw.githubusercontent.com/Denimworld12/Hospital-Chain";
+
+// The one command a friend runs (Docker Desktop and Tailscale already installed, on this tailnet).
+function InstallCommands({ install }) {
+  if (!install) return null;
+  const hub = install.hub || "<this hub's Tailscale IP>";
+  const base = `${RAW}/${install.version}/deploy/install`;
+  return (
+    <div className="card join-code">
+      <p className="field__label">On the hospital's laptop</p>
+      <p>Windows (PowerShell):</p>
+      <pre className="join-code__cmd" data-testid="install-windows">{`$env:MEDCHAIN_HUB = "${hub}"; irm ${base}/install.ps1 | iex`}</pre>
+      <p>macOS or Linux (Terminal):</p>
+      <pre className="join-code__cmd">{`curl -fsSL ${base}/install.sh | MEDCHAIN_HUB=${hub} bash`}</pre>
+      <p>It asks for the hospital&apos;s name and the join code, checks Docker, Tailscale, this hub and disk space, and starts the hospital.</p>
+    </div>
+  );
+}
+
 function when(ts) {
   return ts ? new Date(ts * 1000).toLocaleString() : "-";
 }
@@ -94,6 +113,7 @@ export default function JoinCodes() {
             )}
           </div>
         </div>
+        <InstallCommands install={listing?.install} />
         <div className="journal-wrap">
           <table className="journal" data-testid="join-codes">
             <thead>

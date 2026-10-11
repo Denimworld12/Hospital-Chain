@@ -107,6 +107,9 @@ services:
       # the admin page's join codes, with the admin token the directory writes to hub-secrets
       DIRECTORY_ADMIN_URL: https://directory:${DIRECTORY_PORT:-8100}
       DIRECTORY_ADMIN_TOKEN_FILE: /hub/admin_token
+      # the install commands the Join codes page shows: where hospitals reach this hub
+      HUB_ADDRESS: ${HUB_ADDRESS:-}
+      HUB_DIRECTORY_PORT: ${DIRECTORY_PORT:-8100}
     volumes:
       - ${HUB_KIT}/pki/ca.crt:/pki/ca.crt:ro
       - hub-secrets:/hub:ro

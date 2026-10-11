@@ -101,11 +101,11 @@ export default function App({ username, onLogout }) {
                 {r.label}
               </a>
             ))}
+            <button type="button" className="nav__item logout" onClick={onLogout} title={`Logged in as ${username}`}>
+              Log out
+            </button>
           </nav>
           <span className={`live live--${connection}`}>{connection === "live" ? "Live" : connection}</span>
-          <button type="button" className="logout" onClick={onLogout} title={`Logged in as ${username}`}>
-            Log out
-          </button>
         </div>
       </header>
       <ControlStrip snapshot={snapshot} />

@@ -24,6 +24,8 @@ const DIST = process.env.DASHBOARD_DIST || fileURLToPath(new URL("../dist", impo
 const TICK_MS = Number(process.env.SNAPSHOT_INTERVAL_MS || 1000);
 const UPDATES_TICK_MS = Number(process.env.UPDATES_INTERVAL_MS || 250);
 const SHARED_SECRET = process.env.MEDCHAIN_SHARED_SECRET || "";
+// the published install scripts (deploy/install/) the Join codes page links to, at their release tag
+const INSTALLER_VERSION = process.env.INSTALLER_VERSION || "v1.1.0";
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
 pool.on("error", (err) => console.warn("postgres pool error:", err.message));
@@ -159,7 +161,9 @@ async function authRoute(req, res, action) {
 async function adminRoute(req, res, url, user) {
   if (url.pathname === "/api/admin/join-codes" && req.method === "GET") {
     const out = await directoryAdmin("GET", "/join-codes");
-    return send(res, out.status, out.body);
+    // what the install commands on the page fill in: where hospitals reach this hub's directory
+    const hub = process.env.HUB_ADDRESS ? `${process.env.HUB_ADDRESS}:${process.env.HUB_DIRECTORY_PORT || 8100}` : null;
+    return send(res, out.status, { ...out.body, install: { hub, version: INSTALLER_VERSION } });
   }
   if (url.pathname === "/api/admin/join-codes" && req.method === "POST") {
     const body = await readJson(req);

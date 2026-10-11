@@ -213,7 +213,7 @@ a {
 
 .nav {
   display: flex;
-  gap: var(--spacing-32);
+  gap: 20px;
   flex-wrap: wrap;
   margin-left: auto;
 }
@@ -1199,15 +1199,11 @@ a {
 }
 
 .logout {
-  font-family: var(--font-label);
-  font-size: var(--text-caption);
-  letter-spacing: var(--mc-nav-tracking);
-  text-transform: uppercase;
-  color: var(--color-deep-indigo);
+  color: var(--color-burnt-orange);
   background: transparent;
-  border: var(--mc-hairline);
-  border-radius: var(--radius-tags);
-  padding: 4px var(--spacing-12);
+  border-top: 0;
+  border-left: 0;
+  border-right: 0;
   cursor: pointer;
 }
 
@@ -1221,4 +1217,14 @@ a {
   letter-spacing: 0.08em;
   color: var(--color-deep-indigo);
   overflow-wrap: anywhere;
+}
+
+.join-code__cmd {
+  font-family: var(--font-journal);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--color-cream-paper);
+  border: var(--mc-hairline);
+  padding: var(--spacing-8) var(--spacing-12);
 }

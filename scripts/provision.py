@@ -360,6 +360,8 @@ def hub_env(kit: Path, directory_url: str, observer_url: str, secret: str, image
         MEDCHAIN_SHARED_SECRET={secret}
         IMAGE_VERSION={version}
         """) + (f"MEDCHAIN_IMAGE={repo}\n" if repo else "") + textwrap.dedent(f"""\
+        # Where the hospitals reach this hub: the dashboard's install commands (join codes) use it
+        HUB_ADDRESS={host}
         # The ports in the directory's and the observer's addresses
         DIRECTORY_PORT={urlsplit(directory_url).port or 443}
         OBSERVER_PORT={urlsplit(observer_url).port or OBSERVER_PORT}

@@ -73,7 +73,14 @@ HOSTNAME = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])
 
 
 class EnrollError(Exception):
-    """Why enrollment failed, in words for the person running it."""
+    """Why enrollment failed, in words for the person running it (`status`: the hub's HTTP answer, if any)."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+NAME_TAKEN = 3  # exit status when the hub refused the display name: the install scripts ask for another
 
 
 # -- the protocol (shared with the hub, directory/enroll.py) -------------------------------------
@@ -197,7 +204,7 @@ def request_enrollment(hub: str, display_name: str, code: str, addresses: list[s
     body["proof"] = mac(key, "request", body)
     status, answer, server_pin = post_enroll(host, port, body, timeout)
     if status != 200:
-        raise EnrollError(f"the hub refused: {answer.get('detail', f'HTTP {status}')}")
+        raise EnrollError(f"the hub refused: {answer.get('detail', f'HTTP {status}')}", status)
     given = answer.pop("mac", None)
     if not check_mac(key, "response", answer, given) or answer.get("nonce") != body["nonce"]:
         raise EnrollError("the answer is not from the hub that issued your join code (it does not carry the code's "
@@ -320,7 +327,9 @@ def enrolled_id(out: Path) -> str | None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--hub", required=True, help=f"the hub's directory: host[:port] (default port {DIRECTORY_PORT})")
-    ap.add_argument("--name", required=True, help="this hospital's display name, shown on the dashboard")
+    env = os.environ.get
+    ap.add_argument("--name", default=env("MEDCHAIN_DISPLAY_NAME"),
+                    help="this hospital's display name, shown on the dashboard (default: $MEDCHAIN_DISPLAY_NAME)")
     ap.add_argument("--code", help="the join code (default: $MEDCHAIN_JOIN_CODE)")
     ap.add_argument("--advertise", required=True, help="the address the other hospitals reach this computer at "
                                                        "(its Tailscale IP)")
@@ -331,10 +340,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--image-version", default=os.environ.get("IMAGE_VERSION") or IMAGE_VERSION)
     ap.add_argument("--image", default=os.environ.get("MEDCHAIN_IMAGE") or None, help="the node image repository")
     ap.add_argument("--force", action="store_true", help="enroll again even if --out already holds an enrolled kit")
-    ap.add_argument("--host-name", help="this computer's name (for the dashboard's proof of origin)")
-    ap.add_argument("--host-os", help="its operating system and version")
-    ap.add_argument("--host-booted-at", help="when it booted, Unix seconds (its uptime is counted from this)")
-    ap.add_argument("--tailscale-device", help="its Tailscale device name")
+    # the install scripts pass free text through the environment (Windows PowerShell mangles quotes in arguments)
+    ap.add_argument("--host-name", default=env("MEDCHAIN_HOST_NAME"),
+                    help="this computer's name, for the dashboard's proof of origin (default: $MEDCHAIN_HOST_NAME)")
+    ap.add_argument("--host-os", default=env("MEDCHAIN_HOST_OS"), help="its operating system and version")
+    ap.add_argument("--host-booted-at", default=env("MEDCHAIN_HOST_BOOTED_AT"),
+                    help="when it booted, Unix seconds (its uptime is counted from this)")
+    ap.add_argument("--tailscale-device", default=env("MEDCHAIN_TAILSCALE_DEVICE"), help="its Tailscale device name")
     args = ap.parse_args(argv)
 
     existing = enrolled_id(args.out)
@@ -342,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"already enrolled as {existing} in {args.out}; nothing to do (--force enrolls again)")
         return 0
     code = args.code or os.environ.get("MEDCHAIN_JOIN_CODE", "")
-    name = " ".join(args.name.split())
+    name = " ".join((args.name or "").split())
     try:
         if not code:
             raise EnrollError("no join code: pass --code or set MEDCHAIN_JOIN_CODE")
@@ -354,13 +366,12 @@ def main(argv: list[str] | None = None) -> int:
         answer = request_enrollment(f"{hub_host}:{hub_port}", name, code, [advertise, *args.also], keys)
     except (EnrollError, ValueError) as exc:
         print(f"enroll: {exc}", file=sys.stderr)
-        return 2
+        return NAME_TAKEN if getattr(exc, "status", None) == 409 else 2
     host = {"hostname": args.host_name, "os": args.host_os, "booted_at": args.host_booted_at,
             "tailscale_device": args.tailscale_device}
     write_kit(args.out, answer, keys, kit_env(answer, hub_host, hub_port, advertise, args.port, args.image_version,
                                               args.image, host))
-    print(f"enrolled {answer['display_name']} as {answer['node_id']} (data: {answer['data_slice']['name']}); "
-          f"kit written to {args.out}")
+    print(f"enrolled {answer['display_name']} as {answer['node_id']} (data: {answer['data_slice']['name']})")
     return 0
 
 

@@ -6,9 +6,66 @@ laptop. Your laptop runs one hospital. It trains on the small data file in your 
 and the only thing it sends out is model updates, to the one or two laptops next to
 it in the chain.
 
-You do not need to know Docker or programming. You will install two apps, unzip a
-folder, check one file, and type three commands. Allow about 30 minutes the first
-time, most of it downloads.
+You do not need to know Docker or programming. There are two ways in:
+
+- **One command with a join code (start here).** Install two apps, then paste one
+  command and answer two questions. No zip file, no files to edit, no secret to type.
+- **A kit** (a zip from the organiser) and three commands, further down. It still works.
+
+**What you need:** a laptop (Windows 10/11, Mac or Linux) with at least 8 GB of
+memory, about 5 GB of free disk space, and permission to install apps. Keep it
+plugged in.
+
+## The quick way: one command with a join code
+
+1. Install **Docker Desktop** and **Tailscale** and join the organiser's tailnet:
+   step 1 of the kit way below (only that step). Open Docker Desktop and wait for
+   **Engine running**.
+2. The organiser gives you a **join code** (it looks like `K7QM-2XRT-9VBD-H4NC-PW3Z`,
+   works **once** and expires after **30 minutes**) and the command to paste, with
+   their hub's address already in it.
+3. **Windows:** open **PowerShell** (Start menu, type "PowerShell") and paste:
+
+   ```powershell
+   $env:MEDCHAIN_HUB = "100.101.1.99"; irm https://raw.githubusercontent.com/Denimworld12/Hospital-Chain/v1.1.0/deploy/install/install.ps1 | iex
+   ```
+
+   **Mac or Linux:** open **Terminal** and paste:
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/Denimworld12/Hospital-Chain/v1.1.0/deploy/install/install.sh | MEDCHAIN_HUB=100.101.1.99 bash
+   ```
+
+   (Use the hub address the organiser gave you instead of `100.101.1.99`.)
+4. It checks that Docker is running, Tailscale is connected, the organiser's hub
+   answers and there is enough disk space. If something is missing, it says in plain
+   words what to do: do that and paste the same command again.
+5. It asks for **your hospital's name** (type anything, e.g. `St Mary's Leeds`: this is
+   what everyone sees on the dashboard; if another hospital already has it, it asks for
+   another) and the **join code** (hidden as you type).
+6. It downloads the MedChain program (about 2 GB the first time), makes your
+   hospital's keys **on your laptop** (they never leave it), enrolls with the hub, and
+   starts your hospital. It finds your laptop's Tailscale address by itself.
+
+Your hospital's folder is `MedChain` in your home folder. It holds your keys: don't
+share it. Running the command again is safe: it keeps your keys and enrollment,
+refreshes your address, and restarts the hospital (do that after a reboot, too, so the
+dashboard shows the right uptime). Then do step 4 of the kit way (keep the laptop
+awake). If Windows asks whether **Docker Desktop Backend** may use the network, tick
+**Private networks** and allow.
+
+The organiser's dashboard shows your laptop's real name, operating system, uptime,
+Tailscale name, how fast it reaches its neighbours and how many data rows it holds,
+each signed with your hospital's key and marked **Signature verified**.
+
+To leave the chain politely, then stop (PowerShell; on a Mac use `~/MedChain`):
+
+```powershell
+docker compose --project-directory "$HOME\MedChain" -f "$HOME\MedChain\deploy\node.yml" exec node python -m node.leave
+docker compose --project-directory "$HOME\MedChain" -f "$HOME\MedChain\deploy\node.yml" down
+```
+
+## The kit way
 
 **What the organiser gives you:**
 
@@ -17,9 +74,8 @@ time, most of it downloads.
 - an invite to their Tailscale network (a "tailnet"), by email or as a link.
 - the names to check in your `.env` file (step 2).
 
-**What you need:** a laptop (Mac, Windows 10/11 or Linux) with at least 8 GB of
-memory, about 5 GB of free disk space, and permission to install apps. Keep it
-plugged in.
+You will install two apps, unzip a folder, check one file, and type three commands.
+Allow about 30 minutes the first time, most of it downloads.
 
 ## 1. Install Docker Desktop and Tailscale
 
@@ -219,6 +275,16 @@ to hit. "Preflight says" is the text after `unreachable`; "logs say" is from the
 
 ## For the organiser
 
+**Join codes (the quick way).** Start the hub (`make hub`, step 2 below; the hub kit
+from `provision.py` is still how the hub gets its keys), open the dashboard and log in
+(the first visit creates the admin account, or set `MEDCHAIN_ADMIN_PASSWORD` in
+`hub.env` first). On **JOIN CODES**, press **Create a join code**: it is shown once.
+Give it to one friend with the install command the page shows (it has your hub's
+address, `HUB_ADDRESS` in `hub.env`, in it). Each code works once and expires (30
+minutes by default); **Revoke** cancels one. Nobody types or receives the network
+secret by hand: it travels inside the enrollment. Watch **NODES** for each laptop's
+signed facts. The install scripts need the `v1.1.0` image and tag published (below).
+
 You run the **hub** (the directory, the observer, Postgres and the dashboard) from
 a checkout of this repository. Run it with Docker on your own laptop.
 
@@ -264,7 +330,7 @@ the kit's `pki/`, `data/` and `config/` folders in place of the container's.
 
 **The image** is `ghcr.io/denimworld12/medchain-node:<IMAGE_VERSION>`. It is built for
 both Intel/AMD and ARM (Apple silicon) laptops by `.github/workflows/image.yml` when
-a `v*` tag is pushed (`git tag v1.0.0 && git push origin v1.0.0`), or from
+a `v*` tag is pushed (`git tag v1.1.0 && git push origin v1.1.0`), or from
 Actions > Node image > Run workflow. Friends can only download it without a login if
 the package is public. To make it public: GitHub > your profile > Packages >
 `medchain-node` > Package settings > Change visibility.
