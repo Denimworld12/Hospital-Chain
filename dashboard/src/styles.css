@@ -1187,3 +1187,38 @@ a {
     padding: var(--spacing-16) var(--spacing-32);
   }
 }
+
+/* ---- Login and admin ------------------------------------------------------ */
+
+.auth {
+  max-width: 520px;
+}
+
+.auth__form {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.logout {
+  font-family: var(--font-label);
+  font-size: var(--text-caption);
+  letter-spacing: var(--mc-nav-tracking);
+  text-transform: uppercase;
+  color: var(--color-deep-indigo);
+  background: transparent;
+  border: var(--mc-hairline);
+  border-radius: var(--radius-tags);
+  padding: 4px var(--spacing-12);
+  cursor: pointer;
+}
+
+.join-code {
+  padding: var(--spacing-24);
+}
+
+.join-code__code {
+  font-family: var(--font-journal);
+  font-size: 28px;
+  letter-spacing: 0.08em;
+  color: var(--color-deep-indigo);
+  overflow-wrap: anywhere;
+}

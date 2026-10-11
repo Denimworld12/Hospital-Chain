@@ -12,6 +12,7 @@
     "test": "node --test server/*.test.js"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "pg": "^8.13.1",
     "ws": "^8.18.0"
   },

@@ -102,8 +102,14 @@ services:
       MEDCHAIN_SHARED_SECRET: ${MEDCHAIN_SHARED_SECRET:?set MEDCHAIN_SHARED_SECRET (the kits' shared secret) in hub.env}
       # the relay reaches the hospitals over HTTPS at their registered addresses: trust the network CA
       NODE_EXTRA_CA_CERTS: /pki/ca.crt
+      # the one admin account (dashboard/server/auth.js): unset, the first visitor creates it
+      DASHBOARD_ADMIN_PASSWORD: ${MEDCHAIN_ADMIN_PASSWORD:-}
+      # the admin page's join codes, with the admin token the directory writes to hub-secrets
+      DIRECTORY_ADMIN_URL: https://directory:${DIRECTORY_PORT:-8100}
+      DIRECTORY_ADMIN_TOKEN_FILE: /hub/admin_token
     volumes:
       - ${HUB_KIT}/pki/ca.crt:/pki/ca.crt:ro
+      - hub-secrets:/hub:ro
     depends_on:
       postgres:
         condition: service_healthy

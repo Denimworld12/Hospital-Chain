@@ -221,7 +221,20 @@ curl --cacert .pki/ca.crt https://localhost:8002/metrics
 
 ### 2. Open the dashboard
 
-Open <http://localhost:8080> in a browser.
+Open <http://localhost:8080> in a browser and log in. The dashboard has one admin
+account and shows nothing, not even the live snapshot, to anyone without its session
+(`dashboard/server/auth.js`). The account is created on first run:
+
+- from `MEDCHAIN_ADMIN_PASSWORD` (user `admin`) if you set it before `make up` / `make hub`;
+- otherwise the first person to open the dashboard is asked to create it (pick the
+  username and a password of at least 10 characters).
+
+The password is stored as a bcrypt hash. The session is an httpOnly, SameSite=Strict
+cookie (12 hours; **LOG OUT** in the top bar ends it), and Postgres keeps only its
+SHA-256. Five wrong passwords from one address lock it out for 5 minutes. **JOIN CODES**
+(admin) creates and revokes the one-time codes hospitals enroll with (see
+[Join with a code instead of a kit](#join-with-a-code-instead-of-a-kit)). **NODES**
+shows each hospital's signed proof of origin.
 
 - Press **START TRAINING ROUND** in the top bar. The button changes to show
   `TRAINING: ROUND n OF 400`, and a **PAUSE** button becomes active.

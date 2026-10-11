@@ -8,6 +8,7 @@ import Communication from "./pages/Communication.jsx";
 import AuditLog from "./pages/AuditLog.jsx";
 import Assessment from "./pages/Assessment.jsx";
 import Nodes from "./pages/Nodes.jsx";
+import JoinCodes from "./pages/JoinCodes.jsx";
 import { control, useSnapshot } from "./useSnapshot.js";
 
 const ROUTES = [
@@ -17,6 +18,7 @@ const ROUTES = [
   { hash: "#/nodes", label: "Nodes" },
   { hash: "#/audit", label: "Audit log" },
   { hash: "#/assessment", label: "Risk assessment" },
+  { hash: "#/join-codes", label: "Join codes" },
 ];
 
 function useHashRoute() {
@@ -81,7 +83,7 @@ function ControlStrip({ snapshot }) {
   );
 }
 
-export default function App() {
+export default function App({ username, onLogout }) {
   const route = useHashRoute();
   const { snapshot, connection } = useSnapshot();
 
@@ -101,6 +103,9 @@ export default function App() {
             ))}
           </nav>
           <span className={`live live--${connection}`}>{connection === "live" ? "Live" : connection}</span>
+          <button type="button" className="logout" onClick={onLogout} title={`Logged in as ${username}`}>
+            Log out
+          </button>
         </div>
       </header>
       <ControlStrip snapshot={snapshot} />
@@ -117,6 +122,7 @@ export default function App() {
         {route === "#/nodes" && <Nodes snapshot={snapshot} />}
         {route === "#/audit" && <AuditLog snapshot={snapshot} />}
         {route === "#/assessment" && <Assessment snapshot={snapshot} />}
+        {route === "#/join-codes" && <JoinCodes />}
       </main>
       <footer className="footer">
         <div className="page">
