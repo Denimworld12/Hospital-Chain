@@ -260,6 +260,8 @@ class Runner:
         self._flush_pending()
         if not self.in_chain:
             return "not-in-chain"
+        if len(self.membership.chain) < 2:
+            return "alone"
         self.engine.reset()
         self.run_id = run_id
         self.total_rounds = rounds

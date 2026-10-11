@@ -291,6 +291,32 @@ def test_forgetting_an_abandoned_enrollment_frees_its_name(hub):
     wait_until(lambda: hub.db.events("member_removed"), 5, "the removal in the audit log")
 
 
+def test_removing_an_enrolled_hospital_from_a_two_hospital_chain_frees_its_name(hub, tmp_path, monkeypatch):
+    """The friend's laptop dies after it joined: the organiser forgets it, and the name can be enrolled again."""
+    hub.nodes.append(NodeServer(hub.cfgs["hospital-a"]).start())
+    kit = tmp_path / "kit"
+    (port,) = free_ports(1)
+    assert enroll.main(["--hub", hub.hub, "--name", "St Mary's Leeds", "--code", hub.code(), "--advertise",
+                        "127.0.0.1", "--port", str(port), "--out", str(kit)]) == 0
+    node_id = kit_env(monkeypatch, kit)
+    friend = NodeServer(kit / "config" / "node.yaml").start()
+    hub.nodes.append(friend)
+    wait_until(lambda: hub.nodes[0].status()["chain"] == ["hospital-a", node_id], 20, "a two-hospital chain")
+    friend.stop(abrupt=True)
+    hub.nodes.remove(friend)
+
+    out = hub.admin("POST", f"/admin/members/{node_id}/remove", json={"removed_by": "admin"})
+    assert out.status_code == 200, out.text
+    assert (out.json()["removed_from_chain"], out.json()["forgotten"]) == (True, True)
+    wait_until(lambda: hub.nodes[0].status()["chain"] == ["hospital-a"], 20, "hospital-a left alone")
+    wait_until(lambda: hub.db.keys.get(node_id, {}).get("enrolled") is False, 5, "its token revoked")
+    again = enroll.request_enrollment(hub.hub, "St Mary's Leeds", hub.code(), ["127.0.0.1"], enroll.Keys.generate())
+    assert again["node_id"] != node_id
+    # a kit hospital's name stays taken, from the documents, even when it is not running
+    with pytest.raises(enroll.EnrollError, match=r"\(hospital-a\) is already called"):
+        enroll.request_enrollment(hub.hub, "Hospital-A", hub.code(), ["127.0.0.1"], enroll.Keys.generate())
+
+
 def test_the_organiser_removes_a_hospital_that_is_gone_and_its_neighbours_bridge(tmp_path):
     dir_cfg, cfgs = directory_configs(tmp_path, ["hospital-a", "hospital-b", "hospital-c"], engine="gossip")
     dir_cfg.write_text(dir_cfg.read_text() + f"admin_token_file: {tmp_path / 'admin_token'}\n")
@@ -307,10 +333,14 @@ def test_the_organiser_removes_a_hospital_that_is_gone_and_its_neighbours_bridge
         assert r.json()["told"]["hospital-b"].startswith("unreachable")
         wait_until(lambda: nodes["hospital-a"].status()["chain"] == ["hospital-a", "hospital-c"] ==
                    nodes["hospital-c"].status()["chain"], 20, "a and c bridged")
-        # a chain cannot shrink below two
+        # the organiser may leave a hospital alone in the chain: it stays up, but cannot start a run on its own
         r = httpx.post(f"{directory.url}/admin/members/hospital-c/remove", json={},
                        headers={"Authorization": f"Bearer {ADMIN}"}, verify=directory.verify, timeout=15)
-        assert r.status_code == 409 and "at least 2" in r.json()["detail"]
+        assert r.status_code == 200 and r.json()["removed_from_chain"], r.text
+        wait_until(lambda: nodes["hospital-a"].status()["chain"] == ["hospital-a"], 20, "a alone")
+        r = nodes["hospital-a"].post("/round/start", json={})
+        assert r.status_code == 409 and "alone" in r.json()["detail"], r.text
+        assert nodes["hospital-a"].status()["run_state"] == "idle"
     finally:
         for n in [*nodes.values(), directory]:
             n.stop(abrupt=True)

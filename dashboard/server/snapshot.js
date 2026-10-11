@@ -194,9 +194,10 @@ async function proofRows(pool) {
 
 // The chain's hospitals that were registered before a run started but never took part in it (no round logged,
 // never on its run id): a laptop that was off, or one cut off behind it. A run that "completed" without them
-// did not train on their data, and the control strip says so.
-export function missingFromRun(run, nodes, topology, metrics) {
-  if (!run) return [];
+// did not train on their data, and the control strip says so. Only once the run is over: while it starts, the
+// others are still hearing of it.
+export function missingFromRun(run, state, nodes, topology, metrics) {
+  if (!run || !["completed", "failed"].includes(state)) return [];
   const started = new Date(run.started_at).getTime();
   return nodes
     .filter((n) => (topology?.chain || []).includes(n.node_id))
@@ -270,13 +271,14 @@ export async function buildSnapshot(pool) {
   );
 
   const engine = run?.engine || nodes.find((n) => n.engine)?.engine || "naive gossip baseline";
+  const state = runState(run, nodes);
   return {
     generated_at: new Date().toISOString(),
     engine,
     heartbeat_stale_after_s: STALE_AFTER_S,
     nodes,
     topology,
-    run: run ? { ...run, state: runState(run, nodes), missing: missingFromRun(run, nodes, topology, metrics) } : null,
+    run: run ? { ...run, state, missing: missingFromRun(run, state, nodes, topology, metrics) } : null,
     metrics,
     network_loss: networkLoss,
     consensus,

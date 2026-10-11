@@ -343,6 +343,8 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             raise HTTPException(409, detail=f"{cfg.node_id} is already in run {r.run_id} ({r.state})")
         if outcome == "not-in-chain":
             raise HTTPException(409, detail=f"{cfg.node_id} is not in the chain (epoch {r.epoch})")
+        if outcome == "alone":
+            raise HTTPException(409, detail=f"{cfg.node_id} is alone in the chain: a run needs another hospital to join")
         forwarded = {}
         if outcome == "started":
             # tell neighbours first so they are listening before our first /update arrives

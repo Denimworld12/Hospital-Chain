@@ -242,10 +242,13 @@ test("a run that never reached a chain member is flagged, not reported as plainl
     { node_id: "late-joiner", display_name: "Late", run_id: null, registered_at: "2026-10-11T11:00:00Z" },
   ];
   const metrics = { "hospital-a": [{ round: 1 }] };
-  assert.deepEqual(missingFromRun(run, nodes, topology, metrics).map((n) => n.node_id), ["dead-laptop", "st-marys-3f9a"]);
+  assert.deepEqual(missingFromRun(run, "completed", nodes, topology, metrics).map((n) => n.node_id), ["dead-laptop", "st-marys-3f9a"]);
   // one that took part (it logged rounds, even if it has since moved on) is not missing
-  assert.deepEqual(missingFromRun(run, nodes, topology, { ...metrics, "dead-laptop": [{ round: 1 }], "st-marys-3f9a": [{ round: 2 }] }), []);
+  assert.deepEqual(missingFromRun(run, "completed", nodes, topology, { ...metrics, "dead-laptop": [{ round: 1 }], "st-marys-3f9a": [{ round: 2 }] }), []);
   // a hospital that registered after the run started (or is not in the chain) is not counted
-  assert.deepEqual(missingFromRun(run, nodes, { chain: ["hospital-a", "late-joiner"] }, metrics), []);
-  assert.deepEqual(missingFromRun(null, nodes, topology, metrics), []);
+  assert.deepEqual(missingFromRun(run, "completed", nodes, { chain: ["hospital-a", "late-joiner"] }, metrics), []);
+  assert.deepEqual(missingFromRun(null, "idle", nodes, topology, metrics), []);
+  // while the run is starting or going, the others may simply not have heard of it yet
+  for (const state of ["stalled", "running", "paused"]) assert.deepEqual(missingFromRun(run, state, nodes, topology, metrics), []);
+  assert.equal(missingFromRun(run, "failed", nodes, topology, metrics).length, 2);
 });

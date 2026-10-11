@@ -175,8 +175,11 @@ def create_app(cfg: DirectoryConfig | None = None, database: Database | None = N
                                for r in store.enrolled()]
 
     def member_names() -> dict[str, str]:
-        """{id: display name} of every hospital in the directory's documents (the current and earlier chains)."""
-        return {m.id: m.display_name or m.id for doc in reversed(store.recent(1000)) for m in doc.members.values()}
+        """{id: display name} of the hospitals that may still register, as the directory's documents (the current
+        and earlier chains) name them; a removed enrolled hospital's name is free again."""
+        ids = {str(h["id"]) for h in hospitals()}
+        return {m.id: m.display_name or m.id for doc in reversed(store.recent(1000)) for m in doc.members.values()
+                if m.id in ids}
 
     # why this hub cannot take join codes (None: it can); a hub kit made before join codes has neither the
     # `enrollment:` block nor the CA key
@@ -380,19 +383,21 @@ def create_app(cfg: DirectoryConfig | None = None, database: Database | None = N
             store.log("joined", req.node_id, {"epoch": doc.epoch, "rank": rank, "where": where, "effective_round": at})
             return {"membership": doc.to_dict(), "joined": True, "told": told}
 
-    async def take_out(node_id: str, verb: str) -> tuple[Membership, dict, list[str], int | None]:
+    async def take_out(node_id: str, verb: str, minimum: int = MIN_CHAIN) -> tuple[Membership, dict, list[str], int | None]:
         """Schedule the chain without `node_id`; its two neighbours bridge to each other. Call holding `lock`."""
         latest = store.latest()
         if latest is None or node_id not in latest.chain:
             raise HTTPException(409, detail=f"{node_id} is not in the chain")
         chain = [m for m in latest.chain if m != node_id]
-        if len(chain) < MIN_CHAIN:
+        if len(chain) < minimum:
             raise HTTPException(409, detail=f"a chain needs at least {MIN_CHAIN} hospitals")
         i = latest.chain.index(node_id)
         bridge = [latest.chain[j] for j in (i - 1, i + 1) if 0 <= j < len(latest.chain)]
         run_id, at = await schedule(latest.chain)
         members = {m: v for m, v in latest.members.items() if m != node_id}
-        how = f"{' and '.join(bridge)} bridge to each other" if len(bridge) == 2 else f"{bridge[0]} becomes the chain end"
+        how = (f"{' and '.join(bridge)} bridge to each other" if len(bridge) == 2 else
+               f"{bridge[0]} is left alone until another hospital joins" if len(chain) == 1 else
+               f"{bridge[0]} becomes the chain end" if bridge else "the chain is empty")
         doc, told = await issue(chain, members, f"{node_id} {verb}: {how}", run_id, at)
         return doc, told, bridge, at
 
@@ -408,17 +413,19 @@ def create_app(cfg: DirectoryConfig | None = None, database: Database | None = N
     async def remove_member(node_id: str, req: Remove, request: Request):
         """The organiser takes a hospital out on its behalf: one that is off or gone cannot call /leave itself.
         An enrolled hospital is also forgotten (its credential stops working and its name is free again); a kit
-        hospital stays in hospitals.yaml, so it rejoins if its node starts again."""
+        hospital stays in hospitals.yaml, so it rejoins if its node starts again. Unlike /leave, this may leave
+        a hospital alone in the chain: it waits there, unable to start a run, until another one joins."""
         require_admin(request)
         async with lock:
+            forgotten = store.remove_enrolled(node_id)
+            if forgotten:
+                db.hospital_forgotten(node_id=node_id)
             latest = store.latest()
             in_chain = latest is not None and node_id in latest.chain
             doc = told = None
             if in_chain:
-                doc, told, bridge, at = await take_out(node_id, f"was removed by {req.removed_by or 'the organiser'}")
-            forgotten = store.remove_enrolled(node_id)
-            if forgotten:
-                db.hospital_forgotten(node_id=node_id)
+                doc, told, bridge, at = await take_out(node_id, f"was removed by {req.removed_by or 'the organiser'}",
+                                                       minimum=0)
             if not in_chain and not forgotten:
                 raise HTTPException(404, detail=f"{node_id} is neither in the chain nor an enrolled hospital")
             audit("member_removed", node_id, {"by": req.removed_by, "from_chain": in_chain, "forgotten": forgotten,
