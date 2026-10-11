@@ -731,9 +731,11 @@ and the kits.
 
 The organiser can take a hospital out on its behalf (`POST /admin/members/<id>/remove`,
 the **Remove** button on **NODES**): a laptop that is off cannot call `/leave` itself, and
-until it is out, the hospitals beyond it never start a run (the control strip flags such
-a run as incomplete). An enrolled hospital is forgotten at the same time, which also
-frees the name of an install that never finished.
+until it is out, the hospitals beyond it never start a run (once such a run ends, the
+control strip flags it as incomplete). An enrolled hospital is forgotten at the same time:
+its credential and observer token stop working and its name is free again, even if it
+was once in the chain. Unlike `/leave`, this works in a two-hospital chain: the hospital
+left alone waits there, unable to start a run, until another one joins.
 
 Every attempt is in the audit log (`enrolled`, `enroll_rejected`,
 `join_code_created`, `join_code_revoked`). An enrolled hospital may only register

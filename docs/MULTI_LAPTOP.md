@@ -294,9 +294,10 @@ needs a new kit), set `IMAGE_VERSION=v1.1.0` in the new `kits/directory/hub.env`
 `MEDCHAIN_ADMIN_PASSWORD`, and run `make hub` again.
 
 **A laptop that is off or gone.** A hospital that never answers splits the chain: the
-hospitals beyond it never hear "start". The control strip then says the run is
+hospitals beyond it never hear "start". Once the run ends, the control strip says it was
 **incomplete** and names who never took part. On **NODES**, **Remove** takes that
-hospital out on its behalf: its neighbours bridge to each other, as if it had left. A
+hospital out on its behalf: its neighbours bridge to each other, as if it had left (with
+only two hospitals, yours waits alone until someone joins again). A
 hospital that enrolled with a code is also forgotten (its keys stop working); on **JOIN
 CODES**, **Forget** does the same, and frees the name of an install that failed or was
 abandoned, so the friend can enroll again with a new code. A kit hospital you remove
