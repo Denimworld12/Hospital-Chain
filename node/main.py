@@ -6,6 +6,7 @@ Endpoints
     POST /round/start     start (or join) a training run; floods to neighbours
     POST /round/pause     pause at the next round boundary; floods
     POST /round/resume    resume a paused run; floods
+    POST /round/stop      end the run now (the organiser's Stop, e.g. a neighbour is gone); floods
     POST /update          receive a neighbour's update (the engine's packet bytes)
     GET  /snapshot        ADMM engines: my full theta_hat for a restarted/drifted/new neighbour
     GET  /metrics         this node's per-round metrics for the current/last run
@@ -200,12 +201,17 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         while doc is None:
             try:
                 doc, joined = await discovery.register(r.client, cfg, r.public_key, trainer.n_patients, r.tls_pin)
+                state["registration"] = {"state": "registered", "detail": None}
                 break
             except discovery.DirectoryError as exc:
                 if pinning.is_pin_error(exc):
                     db.audit(node_id=cfg.node_id, event="tls_pin_mismatch", receiver="directory",
                              detail={"reason": str(exc.__cause__ or exc)})
                 log.warning("directory registration failed (%s); retrying in %.0fs", exc, delay)
+                # refused (401/403): the directory does not know this hospital's credential or keys any more,
+                # e.g. the organiser removed it; the install scripts tell the person instead of reporting success
+                state["registration"] = {"state": "refused" if exc.status in (401, 403) else "retrying",
+                                         "detail": str(exc)}
                 unreachable = exc.unreachable
             if unreachable and r.saved and await rejoin_from_saved(r) == "accepted":
                 rejoined = True
@@ -324,6 +330,9 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             "current_round": r.current_round,
             "total_rounds": r.total_rounds,
             "uptime_s": round(time.time() - started_at, 1),
+            # with a directory: registered / retrying / refused (node/registered.py reads it for the install scripts)
+            "registration": state.get("registration") or {"state": "registering" if cfg.directory else "static",
+                                                          "detail": None},
             "assess": assessor.status(),
         }
 
@@ -359,10 +368,12 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         op_id = req.op_id or f"{action}-{secrets.token_hex(6)}"
         if r.seen_op(op_id):
             return {"status": "seen", "node_id": cfg.node_id}
-        changed = r.pause() if action == "pause" else r.resume()
+        run_id = r.run_id
+        changed = {"pause": r.pause, "resume": r.resume, "stop": r.stop}[action]()
         forwarded = await flood(f"/round/{action}", {"op_id": op_id, "origin": cfg.node_id}, req.origin)
-        return {"status": ("paused" if action == "pause" else "running") if changed else r.state,
-                "node_id": cfg.node_id, "run_id": r.run_id, "forwarded": forwarded}
+        done = {"pause": "paused", "resume": "running", "stop": "stopped"}[action]
+        return {"status": done if changed else r.state, "node_id": cfg.node_id, "run_id": run_id,
+                "forwarded": forwarded}
 
     @app.post("/round/pause", dependencies=peer_only)
     async def round_pause(req: ControlRequest | None = None):
@@ -371,6 +382,10 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
     @app.post("/round/resume", dependencies=peer_only)
     async def round_resume(req: ControlRequest | None = None):
         return await control("resume", req or ControlRequest())
+
+    @app.post("/round/stop", dependencies=peer_only)
+    async def round_stop(req: ControlRequest | None = None):
+        return await control("stop", req or ControlRequest())
 
     @app.post("/update", dependencies=peer_only)
     async def update(request: Request):

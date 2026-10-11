@@ -54,7 +54,9 @@ export default function Nodes({ snapshot }) {
   const names = Object.fromEntries((snapshot?.nodes || []).map((n) => [n.node_id, n.display_name]));
   // every hospital the dashboard knows, with its newest proof (or none: a node that never sent one is listed too)
   const byId = Object.fromEntries((snapshot?.proofs || []).map((p) => [p.node_id, p]));
-  const proofs = [...new Set([...chain, ...Object.keys(byId)])].map((id) => byId[id] || {
+  // outside the chain, only a hospital still proving itself is listed (a removed one goes quiet and drops off)
+  const outside = Object.keys(byId).filter((id) => !chain.includes(id) && byId[id].status === "verified");
+  const proofs = [...new Set([...chain, ...outside])].map((id) => byId[id] || {
     node_id: id, display_name: names[id] || id, status: "none", message: null, seconds_since_proof: null,
   });
   const remove = async (id) => {

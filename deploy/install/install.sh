@@ -26,6 +26,7 @@ DIR=${MEDCHAIN_DIR:-$HOME/MedChain}
 PORT=${MEDCHAIN_PORT:-8000}
 DIRECTORY_PORT=8100
 NEED_GB=5
+REGISTER_TRIES=${MEDCHAIN_REGISTER_TRIES:-20}  # x 3 s: how long to wait for the hub to place the hospital
 
 ok() { printf '  [ok] %s\n' "$1"; }
 CREATED_DIR=""
@@ -166,6 +167,20 @@ docker compose --project-directory "$DIR" -f "$DIR/deploy/node.yml" up -d ||
   problem "Docker could not start the hospital." \
           "If it says 'port is already allocated', another program uses port $PORT: stop it, or set MEDCHAIN_PORT to another port and run the same command again (no new join code needed). Otherwise restart Docker and run this again."
 UP="docker compose --project-directory \"$DIR\" -f \"$DIR/deploy/node.yml\""
+
+# ---- 9. Did the hub let it in? -------------------------------------------------------------------
+printf '\nWaiting for the hub to place this hospital (up to %ss)...\n' "$((REGISTER_TRIES * 3))"
+registered=""
+for _ in $(seq 1 "$REGISTER_TRIES"); do
+  line=$(docker compose --project-directory "$DIR" -f "$DIR/deploy/node.yml" exec -T node python -m node.registered 2>/dev/null)
+  code=$?
+  [ $code -eq 0 ] && { registered=1; break; }
+  [ $code -eq 3 ] && docker compose --project-directory "$DIR" -f "$DIR/deploy/node.yml" down >/dev/null 2>&1 &&
+    problem "The organiser removed this computer from the network: the hub refuses its keys (${line#the hub refuses this hospital: })." \
+    "Delete the folder $DIR, ask the organiser for a new join code, then run the same command again."
+  sleep 3
+done
+[ -n "$registered" ] || printf '  (it has not reached the hub yet; it keeps trying by itself. If this lasts, check the hub address with the organiser.)\n'
 printf '\nDone. This computer is running hospital %s.\n' "$NODE_ID"
 printf '  - Keep it plugged in and awake, with Docker and Tailscale running.\n'
 printf "  - The organiser sees this computer's name and live numbers on the dashboard's Nodes page within a minute.\n"

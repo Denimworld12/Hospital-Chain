@@ -349,6 +349,14 @@ class Runner:
         self.db.heartbeat(self.cfg.node_id, self.run_id, self.state, self.current_round)
         return True
 
+    def stop(self) -> bool:
+        """End the run now (the organiser's Stop): its task is cancelled, so the loop ends it as "stopped"."""
+        if not self.active or self._task is None or self._task.done():
+            return False
+        self.db.audit(node_id=self.cfg.node_id, event="run_stopped", run_id=self.run_id, round_num=self.current_round)
+        self._task.cancel()
+        return True
+
     async def shutdown(self) -> None:
         if self._task and not self._task.done():
             self._task.cancel()

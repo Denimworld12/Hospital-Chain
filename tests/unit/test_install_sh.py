@@ -14,6 +14,7 @@ pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash
 STUBS = {
     "docker": """\
         echo "docker $*" >>"$STUB_LOG"
+        case " $* " in *" exec "*) echo "registration"; exit "${REGISTER_EXIT:-0}" ;; esac
         case "$1" in
           run)
             kit=$(printf '%s\\n' "$@" | sed -n 's/:\\/kit$//p')
@@ -87,3 +88,18 @@ def test_a_rerun_with_medchain_port_moves_the_enrolled_node_without_a_new_code(t
     run_installer(tmp_path)
     assert dict(line.split("=", 1) for line in (kit / ".env").read_text().splitlines())["NODE_PORT"] == "18023"
 
+
+
+def test_a_hospital_the_organiser_removed_is_told_so_instead_of_done(tmp_path):
+    """Re-running the installer after the organiser removed this laptop: the hub refuses it, so no "Done"."""
+    kit = tmp_path / "MedChain"
+    (kit / "pki" / "st-marys-3f9a").mkdir(parents=True)
+    (kit / "pki" / "st-marys-3f9a" / "tls.crt").write_text("cert")
+    (kit / ".env").write_text("NODE_ID=st-marys-3f9a\nNODE_PORT=8000\n")
+    r, calls = run_installer(tmp_path, REGISTER_EXIT="3")
+    assert r.returncode == 1 and "Done" not in r.stdout
+    assert "organiser removed this computer" in r.stderr and "new join code" in r.stderr
+    assert calls.splitlines()[-1].endswith("down"), "the refused node is stopped, not left retrying"
+    # one that is simply slow to reach the hub still finishes, saying it keeps trying
+    r, _ = run_installer(tmp_path, REGISTER_EXIT="1", MEDCHAIN_REGISTER_TRIES="1")
+    assert r.returncode == 0 and "keeps trying" in r.stdout and "Done" in r.stdout

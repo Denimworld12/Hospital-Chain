@@ -358,3 +358,25 @@ def test_a_hub_made_before_join_codes_says_how_to_upgrade(tmp_path):
         assert "made before join codes" in r.json()["detail"] and "provision.py" in r.json()["detail"]
     finally:
         directory.stop(abrupt=True)
+
+
+def test_a_removed_hospital_learns_it_was_removed(hub, tmp_path, monkeypatch):
+    """The installer asks node.registered after starting the node: a forgotten hospital is refused, not "Done"."""
+    from node import registered
+
+    kit = tmp_path / "kit"
+    (port,) = free_ports(1)
+    hub.nodes.append(NodeServer(hub.cfgs["hospital-a"]).start())
+    assert enroll.main(["--hub", hub.hub, "--name", "Riverside", "--code", hub.code(), "--advertise", "127.0.0.1",
+                        "--port", str(port), "--out", str(kit)]) == 0
+    node_id = kit_env(monkeypatch, kit)
+    node = NodeServer(kit / "config" / "node.yaml").start()
+    wait_until(lambda: registered.check()[0] == 0, 20, "registered")
+    assert hub.admin("POST", f"/admin/members/{node_id}/remove", json={}).json()["forgotten"]
+    node.stop(abrupt=True)
+    node = NodeServer(kit / "config" / "node.yaml").start()  # the laptop comes back (a reboot, a re-run)
+    hub.nodes.append(node)
+    code, line = wait_until(lambda: (lambda c: c if c[0] == registered.REFUSED else None)(registered.check()), 20,
+                            "refused")
+    assert "not a hospital this directory knows" in line
+    assert node.status()["registration"]["state"] == "refused"

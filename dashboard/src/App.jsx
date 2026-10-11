@@ -81,6 +81,13 @@ function ControlStrip({ snapshot }) {
               Pause
             </PillButton>
           )}
+          {running && (
+            // ends the run on every hospital it reaches: the way out of a run that cannot finish (a neighbour is gone)
+            <PillButton variant="secondary" onClick={() => window.confirm("Stop this training run on every hospital?")
+              && act("stop")} disabled={busy}>
+              Stop
+            </PillButton>
+          )}
         </div>
       </div>
       {message && <p className="page control-strip__message" role="status">{message}</p>}

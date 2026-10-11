@@ -251,4 +251,5 @@ test("a run that never reached a chain member is flagged, not reported as plainl
   // while the run is starting or going, the others may simply not have heard of it yet
   for (const state of ["stalled", "running", "paused"]) assert.deepEqual(missingFromRun(run, state, nodes, topology, metrics), []);
   assert.equal(missingFromRun(run, "failed", nodes, topology, metrics).length, 2);
+  assert.equal(missingFromRun(run, "stopped", nodes, topology, metrics).length, 2, "a run the organiser stopped too");
 });

@@ -235,7 +235,8 @@ SHA-256. Five wrong passwords from one address lock it out for 5 minutes. **JOIN
 [Join with a code instead of a kit](#join-with-a-code-instead-of-a-kit)). **NODES**
 shows each hospital's signed proof of origin.
 
-- Press **START TRAINING ROUND** in the top bar. The button changes to show
+- Press **START TRAINING ROUND** in the top bar. While a run is going, **STOP** ends it on every
+  hospital (the way out of a run a dead neighbour keeps from finishing). The button changes to show
   `TRAINING: ROUND n OF 400`, and a **PAUSE** button becomes active.
 - Use the top navigation (**TOPOLOGY**, **TRAINING MONITOR**,
   **COMMUNICATION**, **AUDIT LOG**) to watch the run live. With

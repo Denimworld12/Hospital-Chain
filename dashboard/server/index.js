@@ -199,7 +199,7 @@ const server = http.createServer(async (req, res) => {
     if (!user) return send(res, 401, { detail: "Log in first." });
     if (req.url.startsWith("/api/admin/")) return await adminRoute(req, res, new URL(req.url, "http://x"), user);
     if (req.url === "/api/snapshot" && req.method === "GET") return send(res, 200, await buildSnapshot(pool));
-    const m = req.url.match(/^\/api\/round\/(start|pause|resume)$/);
+    const m = req.url.match(/^\/api\/round\/(start|pause|resume|stop)$/);
     if (m && req.method === "POST") {
       const body = await readJson(req);
       const rounds = Number.isInteger(body.rounds) && body.rounds > 0 ? body.rounds : undefined;

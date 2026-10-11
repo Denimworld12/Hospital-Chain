@@ -218,3 +218,18 @@ def test_a_mirror_whose_snapshot_resync_fails_keeps_both_ends_of_the_edge_in_ste
     assert len(b_skipped) >= 3 and a_skipped == b_skipped
     assert_consensus_streak(nodes)
     assert_edges_in_sync(nodes)
+
+
+def test_stop_ends_the_run_on_every_hospital_and_a_new_one_can_start(chain):
+    """The organiser's way out of a run that cannot finish (e.g. a neighbour is gone): Stop floods like Pause."""
+    nodes, _ = chain
+    run_id = start(nodes, rounds=400)
+    wait_until(lambda: nodes["hospital-c"].runner.current_round >= 3, 30, "round 3")
+    r = httpx.post(f"{nodes['hospital-b'].url}/round/stop", json={}, headers=AUTH, timeout=10).json()
+    assert r["status"] == "stopped" and r["run_id"] == run_id and set(r["forwarded"]) == {"hospital-a", "hospital-c"}
+    wait_until(lambda: all(s.status()["run_state"] == "stopped" for s in nodes.values()), 15, "all stopped")
+    assert all(s.status()["current_round"] < 400 for s in nodes.values())
+    assert all(s.db.events("run_stopped") for s in nodes.values())
+    assert httpx.post(f"{nodes['hospital-a'].url}/round/stop", json={}, headers=AUTH).json()["status"] == "stopped"
+    assert httpx.post(f"{nodes['hospital-a'].url}/round/stop", headers={}).status_code == 401
+    assert start(nodes, rounds=2) != run_id, "a stopped run does not block the next one"

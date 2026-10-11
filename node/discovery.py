@@ -14,6 +14,8 @@ from .membership import Membership
 
 
 class DirectoryError(Exception):
+    status: int | None = None  # the directory's HTTP answer, when it answered
+
     @property
     def unreachable(self) -> bool:
         """True when the directory could not be reached (including a TLS pin refusal), not when it answered."""
@@ -34,7 +36,9 @@ async def _call(client: httpx.AsyncClient, method: str, url: str, **kw) -> dict:
             detail = resp.json().get("detail", resp.text)
         except ValueError:
             detail = resp.text
-        raise DirectoryError(f"{url} answered {resp.status_code}: {detail}")
+        err = DirectoryError(f"{url} answered {resp.status_code}: {detail}")
+        err.status = resp.status_code
+        raise err
     return resp.json()
 
 

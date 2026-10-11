@@ -161,7 +161,9 @@ export default function Topology({ snapshot }) {
           ))}
           {left.map((n) => (
             <li key={n.node_id} className="topo__legend-left" data-left={n.node_id}>
-              <StatusDot status="down" label={false} /> {n.display_name}: left the chain
+              {/* a hospital that left (or was removed) and came back under a new id shares its name: say which */}
+              <StatusDot status="down" label={false} /> {n.display_name}
+              {placed.some((p) => p.display_name === n.display_name) && ` (${n.node_id})`}: left the chain
             </li>
           ))}
         </ul>

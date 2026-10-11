@@ -21,6 +21,7 @@ function runState(run, nodes) {
   if (states.has("running")) return "running";
   if (states.has("paused")) return "paused";
   if (states.has("failed")) return "failed";
+  if (states.has("stopped")) return "stopped";
   if (states.has("completed")) return "completed";
   return inRun.length ? [...states][0] : "stalled";
 }
@@ -197,7 +198,7 @@ async function proofRows(pool) {
 // did not train on their data, and the control strip says so. Only once the run is over: while it starts, the
 // others are still hearing of it.
 export function missingFromRun(run, state, nodes, topology, metrics) {
-  if (!run || !["completed", "failed"].includes(state)) return [];
+  if (!run || !["completed", "failed", "stopped"].includes(state)) return [];
   const started = new Date(run.started_at).getTime();
   return nodes
     .filter((n) => (topology?.chain || []).includes(n.node_id))

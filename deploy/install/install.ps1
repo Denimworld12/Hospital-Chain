@@ -173,6 +173,10 @@ function Install-MedChain {
                 }
                 $name = [string]$typed
             }
+            if (-not $joinCode -and $unattended) {  # unattended: never prompt (on 5.1 -AsSecureString would wait forever)
+                Problem "No join code given." "Set `$env:MEDCHAIN_JOIN_CODE to the code the organiser gave you, then run the same command again."
+                return
+            }
             if (-not $joinCode) {
                 $secure = Read-Host "The join code (like ABCD-EFGH-JKMN-PQRS-TVWX; hidden as you type)" -AsSecureString
                 if ($null -eq $secure -or $secure.Length -eq 0) {
@@ -220,6 +224,24 @@ function Install-MedChain {
         return
     }
     $id = (Select-String -Path $envFile -Pattern '^NODE_ID=(.+)$' | Select-Object -First 1).Matches[0].Groups[1].Value
+
+    # ---- 9. Did the hub let it in? -------------------------------------------------------------------
+    $tries = if ($env:MEDCHAIN_REGISTER_TRIES) { [int]$env:MEDCHAIN_REGISTER_TRIES } else { 20 }
+    Say ""
+    Say "Waiting for the hub to place this hospital (up to $($tries * 3)s)..."
+    $registered = $false
+    for ($i = 1; $i -le $tries; $i++) {
+        $line = docker compose --project-directory $Dir -f $compose exec -T node python -m node.registered 2>$null
+        $code = $LASTEXITCODE
+        if ($code -eq 0) { $registered = $true; break }
+        if ($code -eq 3) {
+            docker compose --project-directory $Dir -f $compose down *> $null  # it would only retry, refused, forever
+            Problem "The organiser removed this laptop from the network: the hub refuses its keys." "Delete the folder $Dir, ask the organiser for a new join code, then run the same command again."
+            return
+        }
+        Start-Sleep -Seconds 3
+    }
+    if (-not $registered) { Say "  (it has not reached the hub yet; it keeps trying by itself. If this lasts, check the hub address with the organiser.)" }
     Say ""
     Write-Host "Done. This laptop is running hospital $id." -ForegroundColor Green
     Say "  - If Windows asks whether Docker Desktop Backend may use the network, tick 'Private networks' and Allow."

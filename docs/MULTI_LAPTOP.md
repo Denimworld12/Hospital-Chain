@@ -48,7 +48,10 @@ plugged in.
    starts your hospital. It finds your laptop's Tailscale address by itself.
 
 Your hospital's folder is `MedChain` in your home folder. It holds your keys: don't
-share it. Running the command again is safe: it keeps your keys and enrollment,
+share it. It ends by waiting up to a minute for the hub to place your hospital. If the organiser
+removed your laptop from the network, it says so instead of "Done": delete the `MedChain`
+folder, ask for a new join code and run the command again.
+Running the command again is safe: it keeps your keys and enrollment,
 refreshes your address, and restarts the hospital (do that after a reboot, too, so the
 dashboard shows the right uptime). Then do step 4 of the kit way (keep the laptop
 awake). If Windows asks whether **Docker Desktop Backend** may use the network, tick
@@ -292,6 +295,10 @@ page. Upgrade it once: re-run `provision.py` with the same `--peers`, `--directo
 `--pki` as before plus `--hospital directory --force` (every key is kept, so no hospital
 needs a new kit), set `IMAGE_VERSION=v1.1.0` in the new `kits/directory/hub.env`, add
 `MEDCHAIN_ADMIN_PASSWORD`, and run `make hub` again.
+
+**A run that cannot finish** (a hospital went dark mid-run, so its neighbour waits out
+every round): press **Stop** next to Pause on the dashboard. It ends the run on every
+hospital it reaches; then remove the dark one (below) and start again.
 
 **A laptop that is off or gone.** A hospital that never answers splits the chain: the
 hospitals beyond it never hear "start". Once the run ends, the control strip says it was
