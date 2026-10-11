@@ -31,8 +31,10 @@ enroll with join codes from the dashboard.
 Only Docker installed (no Python)? Run it inside the published node image, from the
 repository (or its source zip) folder; the kits land in ./kits as usual:
 
-    docker run --rm -v "${PWD}:/src" -w /src ghcr.io/denimworld12/medchain-node:v1.1.0 \
-        python scripts/provision.py --zip --peers ... --directory ... Every link is HTTPS: each address goes into that hospital's
+    docker run --rm -v "${PWD}:/src" -w /src ghcr.io/denimworld12/medchain-node:v1.1.0 \\
+        python scripts/provision.py --zip --peers ... --directory ...
+
+Every link is HTTPS: each address goes into that hospital's
 certificate, issued by the network CA kept in `--pki` (default kits/.pki). Nodes push
 their telemetry to the observer (`--observer`, default the directory's host on port
 8200) with its token and pin its key; no kit holds database credentials. Re-running

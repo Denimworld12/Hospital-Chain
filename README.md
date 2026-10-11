@@ -612,8 +612,7 @@ image, from the repository folder (a clone or the release's source zip). The sam
 command works in PowerShell and in a Mac or Linux terminal:
 
 ```sh
-docker run --rm -v "${PWD}:/src" -w /src ghcr.io/denimworld12/medchain-node:v1.1.0 \
-  python scripts/provision.py --zip --peers hospital-a=sam-laptop.tail1234.ts.net:8001 --directory sam-laptop.tail1234.ts.net:8100
+docker run --rm -v "${PWD}:/src" -w /src ghcr.io/denimworld12/medchain-node:v1.1.0 python scripts/provision.py --zip --peers hospital-a=sam-laptop.tail1234.ts.net:8001 --directory sam-laptop.tail1234.ts.net:8100
 ```
 
 On Linux, add `--user "$(id -u):$(id -g)"` after `--rm` so the kits belong to you, not root. The command writes `kits/hospital-a/` ... `kits/hospital-d/`
