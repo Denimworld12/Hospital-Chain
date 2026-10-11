@@ -86,6 +86,9 @@ command fetches everything it needs.
      $env:MEDCHAIN_HUB = "100.x.y.z:8100"; irm https://raw.githubusercontent.com/Denimworld12/Hospital-Chain/v1.1.0/deploy/install/install.ps1 | iex
      ```
 
+     Running it again on a laptop that already joined can fail with `v1.1.0`
+     ([#11](https://github.com/Denimworld12/Hospital-Chain/issues/11)); see the [workaround](#windows-step-by-step-docker-and-tailscale-only).
+
    - **Mac or Linux:**
 
      ```sh
