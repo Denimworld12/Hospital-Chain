@@ -33,8 +33,15 @@ CREATED_DIR=""
 problem() {
   # a folder this run created and left empty goes again, so "nothing has been changed" stays true
   [ -n "$CREATED_DIR" ] && rmdir "$DIR" 2>/dev/null
-  printf '\n  [!] %s\n      What to do: %s\n\n  Fix that, then run the same command again. Nothing has been changed on this computer.\n' "$1" "$2" >&2
+  printf '\n  [!] %s\n      What to do: %s\n\n  %s\n' "$1" "$2" \
+    "${3:-Fix that, then run the same command again. Nothing has been changed on this computer.}" >&2
   exit 1
+}
+# node/enroll.py's normalize_code: 20 letters and digits from its alphabet, any dashes or spaces dropped
+valid_code() {
+  local raw
+  raw=$(printf '%s' "$1" | tr -cd 'A-Za-z0-9' | tr 'a-z' 'A-Z')
+  [ "${#raw}" -eq 20 ] && [ -z "$(printf '%s' "$raw" | tr -d 'ABCDEFGHJKMNPQRSTVWXYZ23456789')" ]
 }
 # read from the terminal even when this script itself arrives on stdin (curl ... | bash)
 ask() { local reply; IFS= read -r -p "$1" reply </dev/tty || reply=""; printf '%s' "$reply"; }
@@ -74,7 +81,7 @@ HUB=$(printf '%s' "$HUB" | tr -d '[:space:]')
 case "$HUB" in *:*) HUB_HOST=${HUB%:*}; HUB_PORT=${HUB##*:} ;; *) HUB_HOST=$HUB; HUB_PORT=$DIRECTORY_PORT ;; esac
 curl -sk --max-time 6 "https://$HUB_HOST:$HUB_PORT/health" 2>/dev/null | grep -q '"directory"' ||
   problem "The organiser's hub at $HUB_HOST:$HUB_PORT does not answer." \
-          "Check the address with the organiser, that their hub is running ('make hub'), and that their computer shows as connected in your Tailscale menu. A work VPN can block Tailscale: disconnect it."
+          "Check the address with the organiser, that their hub is running, and that their computer shows as connected in your Tailscale menu. A work VPN can block Tailscale: disconnect it."
 ok "The hub at $HUB_HOST:$HUB_PORT answers"
 
 # ---- 4. Disk space -----------------------------------------------------------------------------
@@ -86,7 +93,33 @@ FREE_KB=$(df -Pk "$DIR" | awk 'NR==2 {print $4}')
           "Free some space, or set MEDCHAIN_DIR to a folder on another disk."
 ok "$((FREE_KB / 1024 / 1024)) GB free"
 
-# ---- 5. The MedChain image ---------------------------------------------------------------------
+# ---- 5. Enrolled already? If not: the hospital's name and the join code, checked before the download ----
+ENV_FILE="$DIR/.env"
+NODE_ID=$(sed -n 's/^NODE_ID=//p' "$ENV_FILE" 2>/dev/null | head -n 1)
+RERUN=""
+if [ -n "$NODE_ID" ] && [ -f "$DIR/pki/$NODE_ID/tls.crt" ]; then
+  RERUN=1
+  ok "This computer is already enrolled ($NODE_ID); keeping its keys"
+else
+  printf '\nEnrolling this computer. The organiser gives you a join code (it works once, for 30 minutes).\n'
+  NAME=${MEDCHAIN_DISPLAY_NAME:-}
+  CODE=${MEDCHAIN_JOIN_CODE:-}
+  if [ -n "$NAME" ] && { [ "${#NAME}" -lt 2 ] || [ "${#NAME}" -gt 60 ]; }; then
+    problem "The hospital name in MEDCHAIN_DISPLAY_NAME must be 2 to 60 characters." \
+            "Set MEDCHAIN_DISPLAY_NAME to the hospital's name, then run the same command again."
+  fi
+  while [ "${#NAME}" -lt 2 ] || [ "${#NAME}" -gt 60 ]; do
+    ( : </dev/tty ) 2>/dev/null || problem "No hospital name given." "Set MEDCHAIN_DISPLAY_NAME, or run it in a terminal and type the name."
+    NAME=$(ask "Your hospital's name, as the dashboard should show it (2 to 60 characters): ")
+  done
+  [ -n "$CODE" ] || CODE=$(ask_hidden "The join code (like ABCD-EFGH-JKMN-PQRS-TVWX; hidden as you type): ")
+  [ -n "$CODE" ] || problem "No join code given." "Set MEDCHAIN_JOIN_CODE to the code the organiser gave you (or type it when asked), then run the same command again."
+  valid_code "$CODE" ||
+    problem "That is not a join code: a join code is 20 letters and digits in groups of four, like ABCD-EFGH-JKMN-PQRS-TVWX." \
+            "Check it with the organiser (or ask for a new one), then run the same command again."
+fi
+
+# ---- 6. The MedChain image ---------------------------------------------------------------------
 printf '\nDownloading the MedChain program (%s:%s, about 2 GB the first time)...\n' "$IMAGE" "$VERSION"
 if ! docker pull "$IMAGE:$VERSION"; then
   docker image inspect "$IMAGE:$VERSION" >/dev/null 2>&1 ||
@@ -95,7 +128,7 @@ if ! docker pull "$IMAGE:$VERSION"; then
   printf '  (could not check for a newer copy; using the one already on this computer)\n'
 fi
 
-# ---- 6. This computer's facts, for the dashboard's proof of origin -----------------------------
+# ---- 7. This computer's facts, for the dashboard's proof of origin -----------------------------
 if [ "$(uname)" = Darwin ]; then
   OS="$(sw_vers -productName) $(sw_vers -productVersion)"
   BOOTED=$(sysctl -n kern.boottime | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')  # "{ sec = 1712345678, usec = ... }"
@@ -110,14 +143,11 @@ MEDCHAIN_HOST_OS=$OS
 MEDCHAIN_HOST_BOOTED_AT=$BOOTED
 MEDCHAIN_TAILSCALE_DEVICE=$DEVICE
 
-# ---- 7. Enroll (once) --------------------------------------------------------------------------
-ENV_FILE="$DIR/.env"
-NODE_ID=$(sed -n 's/^NODE_ID=//p' "$ENV_FILE" 2>/dev/null | head -n 1)
+# ---- 8. Enroll (once), or refresh an enrolled computer's settings -------------------------------
 USER_FLAG=()
 RECREATE=()
 [ "$(uname)" = Linux ] && USER_FLAG=(--user "$(id -u):$(id -g)")  # the kit's files belong to you, not root
-if [ -n "$NODE_ID" ] && [ -f "$DIR/pki/$NODE_ID/tls.crt" ]; then
-  ok "This computer is already enrolled ($NODE_ID); keeping its keys"
+if [ -n "$RERUN" ]; then
   # the node checks in with the hub only when it starts: recreate it, so step 9 sees the hub's answer of now
   RECREATE=(--force-recreate)
   # refresh what can change: this computer's Tailscale address, its facts, and its port when MEDCHAIN_PORT asks
@@ -129,10 +159,7 @@ if [ -n "$NODE_ID" ] && [ -f "$DIR/pki/$NODE_ID/tls.crt" ]; then
       "$NODE_PORT" "$TS_IP" "$NODE_PORT" "$MEDCHAIN_HOST_NAME" "$MEDCHAIN_HOST_OS" "$MEDCHAIN_HOST_BOOTED_AT" "$MEDCHAIN_TAILSCALE_DEVICE"
   } >"$ENV_FILE.new" && mv "$ENV_FILE.new" "$ENV_FILE"
 else
-  printf '\nEnrolling this computer. The organiser gives you a join code (it works once, for 30 minutes).\n'
   enrolled=""
-  NAME=${MEDCHAIN_DISPLAY_NAME:-}
-  CODE=${MEDCHAIN_JOIN_CODE:-}
   for _ in 1 2 3; do
     while [ "${#NAME}" -lt 2 ] || [ "${#NAME}" -gt 60 ]; do
       NAME=$(ask "Your hospital's name, as the dashboard should show it (2 to 60 characters): ")
@@ -164,14 +191,14 @@ else
   NODE_ID=$(sed -n 's/^NODE_ID=//p' "$ENV_FILE" | head -n 1)
 fi
 
-# ---- 8. Start (or restart) the hospital --------------------------------------------------------
+# ---- 9. Start (or restart) the hospital --------------------------------------------------------
 printf '\n'
 docker compose --project-directory "$DIR" -f "$DIR/deploy/node.yml" up -d ${RECREATE[@]+"${RECREATE[@]}"} ||
   problem "Docker could not start the hospital." \
           "If it says 'port is already allocated', another program uses port $PORT: stop it, or set MEDCHAIN_PORT to another port and run the same command again (no new join code needed). Otherwise restart Docker and run this again."
 UP="docker compose --project-directory \"$DIR\" -f \"$DIR/deploy/node.yml\""
 
-# ---- 9. Did the hub let it in? -------------------------------------------------------------------
+# ---- 10. Did the hub let it in? -------------------------------------------------------------------
 printf '\nWaiting for the hub to place this hospital (up to %ss)...\n' "$((REGISTER_TRIES * 3))"
 registered=""
 for _ in $(seq 1 "$REGISTER_TRIES"); do
@@ -181,7 +208,8 @@ for _ in $(seq 1 "$REGISTER_TRIES"); do
   [ $code -eq 3 ] && {
     docker compose --project-directory "$DIR" -f "$DIR/deploy/node.yml" down >/dev/null 2>&1
     problem "The organiser removed this computer from the network: the hub refuses its keys (${line#the hub refuses this hospital: })." \
-      "Delete the folder $DIR, ask the organiser for a new join code, then run the same command again."
+      "Delete the folder $DIR, ask the organiser for a new join code, then run the same command again." \
+      "This computer's hospital has been stopped; nothing else was changed."
   }
   sleep 3
 done

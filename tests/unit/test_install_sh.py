@@ -74,6 +74,19 @@ def test_an_unattended_install_with_a_taken_name_stops_instead_of_asking(tmp_pat
     assert [c.split()[1] for c in calls.splitlines()].count("run") == 1
 
 
+@pytest.mark.parametrize("env, says", [
+    ({"MEDCHAIN_DISPLAY_NAME": "St Mary's"}, "No join code given"),
+    ({"MEDCHAIN_DISPLAY_NAME": "St Mary's", "MEDCHAIN_JOIN_CODE": "ABCD-EFGH"}, "That is not a join code"),
+    ({"MEDCHAIN_DISPLAY_NAME": "S", "MEDCHAIN_JOIN_CODE": "ABCD-EFGH-JKMN-PQRS-TVWX"}, "2 to 60 characters"),
+    ({"MEDCHAIN_JOIN_CODE": "ABCD-EFGH-JKMN-PQRS-TVWX"}, "No hospital name given"),
+])
+def test_a_bad_name_or_code_fails_before_the_download(tmp_path, env, says):
+    r, calls = run_installer(tmp_path, **env)
+    assert r.returncode == 1 and says in r.stderr
+    assert not any(c.split()[1] in ("pull", "run") for c in calls.splitlines()), "nothing is downloaded or enrolled"
+    assert not (tmp_path / "MedChain").exists()
+
+
 def test_a_rerun_with_medchain_port_moves_the_enrolled_node_without_a_new_code(tmp_path):
     kit = tmp_path / "MedChain"
     (kit / "pki" / "st-marys-3f9a").mkdir(parents=True)
@@ -100,6 +113,7 @@ def test_a_hospital_the_organiser_removed_is_told_so_instead_of_done(tmp_path):
     r, calls = run_installer(tmp_path, REGISTER_EXIT="3")
     assert r.returncode == 1 and "Done" not in r.stdout
     assert "organiser removed this computer" in r.stderr and "new join code" in r.stderr
+    assert "has been stopped" in r.stderr and "Nothing has been changed" not in r.stderr
     assert calls.splitlines()[-1].endswith("down"), "the refused node is stopped, not left retrying"
     # the node checks in with the hub only when it starts: a re-run recreates it before asking, so a node that
     # kept running since before the removal is not reported as registered

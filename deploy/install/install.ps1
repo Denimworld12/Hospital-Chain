@@ -16,8 +16,12 @@
 # MEDCHAIN_IMAGE (ghcr.io/denimworld12/medchain-node), MEDCHAIN_IMAGE_VERSION (this installer's).
 # MEDCHAIN_DISPLAY_NAME and MEDCHAIN_JOIN_CODE, if set, are used instead of asking (unattended runs).
 # Works in Windows PowerShell 5.1 and PowerShell 7.
+#
+# A failure exits 1 when run as a file (powershell -File install.ps1) or as a one-off
+# `powershell -Command`; pasted into an open window (irm ... | iex) it sets $LASTEXITCODE to 1
+# instead, so that window stays open.
 
-function Install-MedChain {
+function Install-MedChain($Outcome) {
     $InstallerVersion = "1.1.0"
     $Image = if ($env:MEDCHAIN_IMAGE) { $env:MEDCHAIN_IMAGE } else { "ghcr.io/denimworld12/medchain-node" }
     $Version = if ($env:MEDCHAIN_IMAGE_VERSION) { $env:MEDCHAIN_IMAGE_VERSION } else { "v$InstallerVersion" }
@@ -28,14 +32,27 @@ function Install-MedChain {
 
     function Say($text) { Write-Host $text }
     function Ok($text) { Write-Host "  [ok] $text" -ForegroundColor Green }
-    function Problem($what, $fix) {
+    function Problem($what, $fix, $after = "Fix that, then run the same command again. Nothing has been changed on this laptop.") {
+        $Outcome.Failed = $true
         # a folder this run created and left empty goes again, so "nothing has been changed" stays true
         if ($createdDir -and (Test-Path $Dir) -and -not (Get-ChildItem -Force $Dir)) { Remove-Item $Dir }
         Write-Host ""
         Write-Host "  [!] $what" -ForegroundColor Red
         Write-Host "      What to do: $fix" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "  Fix that, then run the same command again. Nothing has been changed on this laptop." -ForegroundColor Yellow
+        Write-Host "  $after" -ForegroundColor Yellow
+    }
+    # the name and the join code are asked for (and checked) before the 2 GB download, not after it
+    function Read-Name {
+        $typed = Read-Host "Your hospital's name, as the dashboard should show it (2 to 60 characters)"
+        if ($null -eq $typed) { return $null }  # no one to ask (no input at all)
+        return [string]$typed
+    }
+    function Test-Name($text) { return ($text.Trim() -match '^[^\x00-\x1f\x7f]{2,60}$') }
+    # node/enroll.py's normalize_code: 20 letters and digits from its alphabet, any dashes or spaces dropped
+    function Test-JoinCode($text) {
+        $raw = ($text -replace '[^A-Za-z0-9]', '').ToUpperInvariant()
+        return ($raw.Length -eq 20 -and $raw -cmatch '^[ABCDEFGHJKMNPQRSTVWXYZ23456789]+$')
     }
 
     Say ""
@@ -99,7 +116,7 @@ function Install-MedChain {
         if ($wait.AsyncWaitHandle.WaitOne(5000) -and $tcp.Connected) { $reachable = $true }
     } catch { } finally { $tcp.Close() }
     if (-not $reachable) {
-        Problem "The organiser's hub at ${hubHost}:${hubPort} does not answer." "Check the address with the organiser, check that their hub is running ('make hub'), and that their laptop shows as connected in your Tailscale menu. A work VPN can block Tailscale: disconnect it."
+        Problem "The organiser's hub at ${hubHost}:${hubPort} does not answer." "Check the address with the organiser, check that their hub is running, and that their laptop shows as connected in your Tailscale menu. A work VPN can block Tailscale: disconnect it."
         return
     }
     Ok "The hub at ${hubHost}:${hubPort} answers"
@@ -114,7 +131,57 @@ function Install-MedChain {
     }
     Ok "$freeGB GB free on $root"
 
-    # ---- 5. The MedChain image --------------------------------------------------------------------
+    # ---- 5. Enrolled already? If not: the hospital's name and the join code, checked before the download ----
+    $envFile = Join-Path $Dir ".env"
+    $id = $null
+    if (Test-Path $envFile) {
+        $idLine = Select-String -Path $envFile -Pattern '^NODE_ID=(.+)$' | Select-Object -First 1
+        if ($idLine -and (Test-Path ([IO.Path]::Combine($Dir, "pki", $idLine.Matches[0].Groups[1].Value, "tls.crt")))) {
+            $id = $idLine.Matches[0].Groups[1].Value
+        }
+    }
+    $rerun = [bool]$id
+    if ($rerun) {
+        Ok "This laptop is already enrolled ($id); keeping its keys"
+    } else {
+        Say ""
+        Say "Enrolling this laptop. The organiser gives you a join code (it works once, for 30 minutes)."
+        # unattended (the name given in MEDCHAIN_DISPLAY_NAME): never fall back to asking, as install.sh
+        $unattended = [bool]$env:MEDCHAIN_DISPLAY_NAME
+        $name = if ($env:MEDCHAIN_DISPLAY_NAME) { [string]$env:MEDCHAIN_DISPLAY_NAME } else { "" }
+        $joinCode = if ($env:MEDCHAIN_JOIN_CODE) { [string]$env:MEDCHAIN_JOIN_CODE } else { "" }
+        if ($unattended -and -not (Test-Name $name)) {
+            Problem "The hospital name in `$env:MEDCHAIN_DISPLAY_NAME must be 2 to 60 characters." "Set `$env:MEDCHAIN_DISPLAY_NAME to the hospital's name, then run the same command again."
+            return
+        }
+        while (-not (Test-Name $name)) {
+            $name = Read-Name
+            if ($null -eq $name) {
+                Problem "No hospital name given." "Run it in a PowerShell window and type the name, or set `$env:MEDCHAIN_DISPLAY_NAME."
+                return
+            }
+        }
+        if (-not $joinCode -and $unattended) {  # unattended: never prompt (on 5.1 -AsSecureString would wait forever)
+            Problem "No join code given." "Set `$env:MEDCHAIN_JOIN_CODE to the code the organiser gave you, then run the same command again."
+            return
+        }
+        if (-not $joinCode) {
+            $secure = Read-Host "The join code (like ABCD-EFGH-JKMN-PQRS-TVWX; hidden as you type)" -AsSecureString
+            if ($null -eq $secure -or $secure.Length -eq 0) {
+                Problem "No join code given." "Ask the organiser for a join code and type it when asked, or set `$env:MEDCHAIN_JOIN_CODE."
+                return
+            }
+            $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+            try { $joinCode = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+            finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+        }
+        if (-not (Test-JoinCode $joinCode)) {
+            Problem "That is not a join code: a join code is 20 letters and digits in groups of four, like ABCD-EFGH-JKMN-PQRS-TVWX." "Check it with the organiser (or ask for a new one), then run the same command again."
+            return
+        }
+    }
+
+    # ---- 6. The MedChain image --------------------------------------------------------------------
     Say ""
     Say "Downloading the MedChain program ($Image`:$Version, about 2 GB the first time)..."
     docker pull "${Image}:${Version}"
@@ -127,27 +194,18 @@ function Install-MedChain {
         Say "  (could not check for a newer copy; using the one already on this laptop)"
     }
 
-    # ---- 6. This computer's facts, for the dashboard's proof of origin --------------------------
-    $os = Get-CimInstance Win32_OperatingSystem
+    # ---- 7. This computer's facts, for the dashboard's proof of origin --------------------------
+    # (no CIM, as in PowerShell 7 off Windows: the version string, and no boot time)
+    $os = if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) { Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue }
     $env:MEDCHAIN_HOST_NAME = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [Environment]::MachineName }
-    $env:MEDCHAIN_HOST_OS = "$($os.Caption) $($os.Version)"
-    $env:MEDCHAIN_HOST_BOOTED_AT = [string][int64](([DateTimeOffset]$os.LastBootUpTime).ToUnixTimeSeconds())
+    $env:MEDCHAIN_HOST_OS = if ($os) { "$($os.Caption) $($os.Version)" } else { [Environment]::OSVersion.VersionString }
+    $env:MEDCHAIN_HOST_BOOTED_AT = if ($os) { [string][int64](([DateTimeOffset]$os.LastBootUpTime).ToUnixTimeSeconds()) } else { "" }
     $env:MEDCHAIN_TAILSCALE_DEVICE = $device
 
-    # ---- 7. Enroll (once) ---------------------------------------------------------------------------
+    # ---- 8. Enroll (once), or refresh an enrolled laptop's settings -----------------------------------
     $createdDir = -not (Test-Path $Dir)
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-    $envFile = Join-Path $Dir ".env"
-    $enrolled = $false
-    if (Test-Path $envFile) {
-        $idLine = Select-String -Path $envFile -Pattern '^NODE_ID=(.+)$' | Select-Object -First 1
-        if ($idLine -and (Test-Path ([IO.Path]::Combine($Dir, "pki", $idLine.Matches[0].Groups[1].Value, "tls.crt")))) {
-            $enrolled = $true
-        }
-    }
-    $rerun = $enrolled
-    if ($enrolled) {
-        Ok "This laptop is already enrolled ($($idLine.Matches[0].Groups[1].Value)); keeping its keys"
+    if ($rerun) {
         # refresh what can change: this laptop's Tailscale address, its facts, and its port when MEDCHAIN_PORT asks
         # for another one (peers pin the key, not the address: no new join code is needed)
         $keep = Get-Content $envFile | Where-Object { $_ -notmatch '^(NODE_PORT|ADVERTISE_ADDR|MEDCHAIN_HOST_NAME|MEDCHAIN_HOST_OS|MEDCHAIN_HOST_BOOTED_AT|MEDCHAIN_TAILSCALE_DEVICE)=' }
@@ -159,34 +217,14 @@ function Install-MedChain {
             "MEDCHAIN_TAILSCALE_DEVICE=$env:MEDCHAIN_TAILSCALE_DEVICE")
         [System.IO.File]::WriteAllLines($envFile, $lines)  # no BOM: Docker Compose reads it
     } else {
-        Say ""
-        Say "Enrolling this laptop. The organiser gives you a join code (it works once, for 30 minutes)."
-        # unattended (the name given in MEDCHAIN_DISPLAY_NAME): never fall back to asking, as install.sh
-        $unattended = [bool]$env:MEDCHAIN_DISPLAY_NAME
-        $name = if ($env:MEDCHAIN_DISPLAY_NAME) { [string]$env:MEDCHAIN_DISPLAY_NAME } else { "" }
-        $joinCode = if ($env:MEDCHAIN_JOIN_CODE) { $env:MEDCHAIN_JOIN_CODE } else { "" }
+        $enrolled = $false
         for ($try = 1; $try -le 3; $try++) {
-            while ($name.Trim().Length -lt 2 -or $name.Trim().Length -gt 60) {
-                $typed = Read-Host "Your hospital's name, as the dashboard should show it (2 to 60 characters)"
-                if ($null -eq $typed) {  # no one to ask (no input at all)
+            while (-not (Test-Name $name)) {
+                $name = Read-Name
+                if ($null -eq $name) {
                     Problem "No hospital name given." "Run it in a PowerShell window and type the name, or set `$env:MEDCHAIN_DISPLAY_NAME."
                     return
                 }
-                $name = [string]$typed
-            }
-            if (-not $joinCode -and $unattended) {  # unattended: never prompt (on 5.1 -AsSecureString would wait forever)
-                Problem "No join code given." "Set `$env:MEDCHAIN_JOIN_CODE to the code the organiser gave you, then run the same command again."
-                return
-            }
-            if (-not $joinCode) {
-                $secure = Read-Host "The join code (like ABCD-EFGH-JKMN-PQRS-TVWX; hidden as you type)" -AsSecureString
-                if ($null -eq $secure -or $secure.Length -eq 0) {
-                    Problem "No join code given." "Ask the organiser for a join code and type it when asked, or set `$env:MEDCHAIN_JOIN_CODE."
-                    return
-                }
-                $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-                try { $joinCode = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
-                finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
             }
             $env:MEDCHAIN_JOIN_CODE = $joinCode
             $env:MEDCHAIN_DISPLAY_NAME = $name.Trim()
@@ -214,21 +252,23 @@ function Install-MedChain {
             Problem "No free name after three tries." "Pick a name no other hospital uses, then run the same command again."
             return
         }
+        $id = (Select-String -Path $envFile -Pattern '^NODE_ID=(.+)$' | Select-Object -First 1).Matches[0].Groups[1].Value
     }
 
-    # ---- 8. Start (or restart) the hospital --------------------------------------------------------
+    # ---- 9. Start (or restart) the hospital --------------------------------------------------------
     Say ""
     $compose = [IO.Path]::Combine($Dir, "deploy", "node.yml")
     # the node checks in with the hub only when it starts: on a re-run recreate it, so step 9 sees the hub's answer of now
-    $recreate = if ($rerun) { @("--force-recreate") } else { @() }
+    # @(if ...) keeps it an array: `if` alone unwraps a one-element array into a string, and splatting a
+    # string passes it one character at a time ("no such service: -")
+    $recreate = @(if ($rerun) { "--force-recreate" })
     docker compose --project-directory $Dir -f $compose up -d @recreate
     if ($LASTEXITCODE -ne 0) {
         Problem "Docker could not start the hospital." "If it says 'port is already allocated', another program uses port ${Port}: close it, or set `$env:MEDCHAIN_PORT to another port and run the same command again (no new join code needed). Otherwise restart Docker Desktop and run this again."
         return
     }
-    $id = (Select-String -Path $envFile -Pattern '^NODE_ID=(.+)$' | Select-Object -First 1).Matches[0].Groups[1].Value
 
-    # ---- 9. Did the hub let it in? -------------------------------------------------------------------
+    # ---- 10. Did the hub let it in? -------------------------------------------------------------------
     $tries = if ($env:MEDCHAIN_REGISTER_TRIES) { [int]$env:MEDCHAIN_REGISTER_TRIES } else { 20 }
     Say ""
     Say "Waiting for the hub to place this hospital (up to $($tries * 3)s)..."
@@ -239,7 +279,7 @@ function Install-MedChain {
         if ($code -eq 0) { $registered = $true; break }
         if ($code -eq 3) {
             docker compose --project-directory $Dir -f $compose down *> $null  # it would only retry, refused, forever
-            Problem "The organiser removed this laptop from the network: the hub refuses its keys." "Delete the folder $Dir, ask the organiser for a new join code, then run the same command again."
+            Problem "The organiser removed this laptop from the network: the hub refuses its keys." "Delete the folder $Dir, ask the organiser for a new join code, then run the same command again." "This laptop's hospital has been stopped; nothing else was changed."
             return
         }
         Start-Sleep -Seconds 3
@@ -258,4 +298,13 @@ function Install-MedChain {
     Say "  Stop:      $up down"
 }
 
-Install-MedChain
+$medchainOutcome = @{ Failed = $false }
+Install-MedChain $medchainOutcome
+if ($medchainOutcome.Failed) {
+    # exit (so a caller sees the failure) unless this runs in a window someone keeps using: `exit` would close it
+    $cli = @([Environment]::GetCommandLineArgs() | Select-Object -Skip 1)
+    $oneShot = @($cli | Where-Object { $_ -match '^[-/]{1,2}(c|com\w*|e|ec|enc\w*|f|fi\w*|noni\w*)$' }).Count -gt 0
+    $keepOpen = @($cli | Where-Object { $_ -match '^[-/]{1,2}noe\w*$' }).Count -gt 0
+    if ($PSCommandPath -or ($oneShot -and -not $keepOpen)) { exit 1 }
+    $global:LASTEXITCODE = 1
+}

@@ -7,18 +7,65 @@ import { notAuthorized } from "../auth.js";
 
 const RAW = "https://raw.githubusercontent.com/Denimworld12/Hospital-Chain";
 
+// navigator.clipboard exists only in a secure context (https, or localhost): a dashboard opened at the hub's
+// Tailscale IP over http falls back to the older selection copy
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.select();
+  try {
+    if (!document.execCommand("copy")) throw new Error("copy refused");
+  } finally {
+    document.body.removeChild(area);
+  }
+}
+
+function CopyButton({ text, label = "Copy", testId }) {
+  const [state, setState] = useState("idle");
+  useEffect(() => {
+    if (state === "idle") return undefined;
+    const t = setTimeout(() => setState("idle"), 2000);
+    return () => clearTimeout(t);
+  }, [state]);
+  const copy = async () => {
+    try {
+      await copyText(text);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+  };
+  return (
+    <PillButton variant="secondary" onClick={copy} data-testid={testId} aria-live="polite">
+      {state === "copied" ? "Copied" : state === "failed" ? "Select and copy by hand" : label}
+    </PillButton>
+  );
+}
+
 // The one command a friend runs (Docker Desktop and Tailscale already installed, on this tailnet).
 function InstallCommands({ install }) {
   if (!install) return null;
   const hub = install.hub || "<this hub's Tailscale IP>";
   const base = `${RAW}/${install.version}/deploy/install`;
+  const windows = `$env:MEDCHAIN_HUB = "${hub}"; irm ${base}/install.ps1 | iex`;
+  const unix = `curl -fsSL ${base}/install.sh | MEDCHAIN_HUB=${hub} bash`;
   return (
     <div className="card join-code">
       <p className="field__label">On the hospital's laptop</p>
       <p>Windows (PowerShell):</p>
-      <pre className="join-code__cmd" data-testid="install-windows">{`$env:MEDCHAIN_HUB = "${hub}"; irm ${base}/install.ps1 | iex`}</pre>
+      <pre className="join-code__cmd" data-testid="install-windows">{windows}</pre>
+      <CopyButton text={windows} label="Copy the Windows command" testId="copy-install-windows" />
       <p>macOS or Linux (Terminal):</p>
-      <pre className="join-code__cmd">{`curl -fsSL ${base}/install.sh | MEDCHAIN_HUB=${hub} bash`}</pre>
+      <pre className="join-code__cmd">{unix}</pre>
+      <CopyButton text={unix} label="Copy the macOS/Linux command" testId="copy-install-unix" />
       <p>It asks for the hospital&apos;s name and the join code, checks Docker, Tailscale, this hub and disk space, and starts the hospital.</p>
     </div>
   );
@@ -120,6 +167,7 @@ export default function JoinCodes() {
               <>
                 <p className="field__label">Give this code to one hospital. It is shown only now.</p>
                 <p className="join-code__code" data-testid="join-code">{created.code}</p>
+                <CopyButton text={created.code} label="Copy the code" testId="copy-join-code" />
                 <p>Expires {when(created.expires_at)}. Works once.</p>
               </>
             ) : (

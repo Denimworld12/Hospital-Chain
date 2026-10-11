@@ -226,8 +226,17 @@ def test_a_changed_address_gets_a_new_certificate(tmp_path):
     assert "100.101.1.77" in sans(tmp_path / "hospital-a" / "pki/hospital-a/tls.crt")
 
 
+def test_the_organisers_own_hospital_alone_is_enough_when_join_codes_add_the_rest(tmp_path, monkeypatch):
+    assert provision.main(["--peers", "hospital-a=100.101.1.99:8001", "--directory", DIRECTORY,
+                           "--out", str(tmp_path)]) == 0
+    assert kit_config(tmp_path / "hospital-a", monkeypatch).port == 8001
+    d = tmp_path / "directory"
+    assert [h["id"] for h in yaml.safe_load((d / "pki/directory/hospitals.yaml").read_text())] == ["hospital-a"]
+    assert yaml.safe_load((d / "config/directory.yaml").read_text())["enrollment"]["ca_key"] == "/pki/ca.key"
+
+
 @pytest.mark.parametrize("peers, extra", [
-    ("hospital-a=10.0.0.1:8001", []),                                              # not a chain
+    (" , ", []),                                                                   # no hospital at all
     ("hospital-a=10.0.0.1:8001,hospital-a=10.0.0.2:8001", []),                    # duplicate id
     ("hospital-a=ftp://10.0.0.1:8001,hospital-b=10.0.0.2:8002", []),              # not https
     ("hospital-a=http://10.0.0.1:8001,hospital-b=10.0.0.2:8002", []),             # plain HTTP is not allowed

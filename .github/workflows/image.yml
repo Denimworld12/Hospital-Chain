@@ -116,8 +116,9 @@ jobs:
           sources=()
           for digest in *; do sources+=("$IMAGE@sha256:$digest"); done
           docker buildx imagetools create -t "$IMAGE:$VERSION" "${sources[@]}"
+      # the JSON comes pretty-printed ("architecture": "arm64", with a space): read it with jq, not grep
       - name: check it
         run: |
           docker buildx imagetools inspect "$IMAGE:$VERSION"
           docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Manifests}}' \
-            | grep -q '"architecture":"arm64"'
+            | jq -e '[.[].platform.architecture] | (index("amd64") != null) and (index("arm64") != null)'

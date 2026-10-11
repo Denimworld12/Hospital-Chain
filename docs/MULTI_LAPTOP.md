@@ -278,8 +278,9 @@ to hit. "Preflight says" is the text after `unreachable`; "logs say" is from the
 
 ## For the organiser
 
-**Join codes (the quick way).** Start the hub (`make hub`, step 2 below; the hub kit
-from `provision.py` is still how the hub gets its keys), open the dashboard and log in
+**Join codes (the quick way).** Make your kits with only your own hospital in
+`--peers` (step 1 below: the hub kit from `provision.py` is still how the hub gets
+its keys; everyone else joins with a code), start the hub (step 2), open the dashboard and log in
 as `admin` (set `MEDCHAIN_ADMIN_PASSWORD`, at least 10 characters, in `hub.env`
 first: without it nobody can log in). On **JOIN CODES**, press **Create a join code**: it is shown once.
 Give it to one friend with the install command the page shows (it has your hub's
@@ -316,7 +317,8 @@ code needed. **Postgres already running on the hub laptop?** Set `POSTGRES_PORT`
 `hub.env`.
 
 You run the **hub** (the directory, the observer, Postgres and the dashboard) from
-a checkout of this repository. Run it with Docker on your own laptop.
+a checkout of this repository, or the release's source zip, unpacked. Run it with
+Docker on your own laptop. Docker is all you need: no Python, no `make`.
 
 1. **Make the kits.** List every hospital with the address the others will reach
    it at (including any you run yourself, like `hospital-d` here), and your
@@ -328,16 +330,33 @@ a checkout of this repository. Run it with Docker on your own laptop.
      --directory sam-laptop.tail1234.ts.net:8100
    ```
 
+   If everyone else will join with a join code, list only your own hospital:
+   `--peers hospital-d=sam-laptop.tail1234.ts.net:8004`.
+
+   **No Python?** Run the same command inside the published image, from the
+   repository folder (it works in PowerShell and in a Mac or Linux terminal; on
+   Linux add `--user "$(id -u):$(id -g)"` after `--rm` so the kits belong to you):
+
+   ```sh
+   docker run --rm -v "${PWD}:/src" -w /src ghcr.io/denimworld12/medchain-node:v1.1.0 python scripts/provision.py --zip --peers hospital-d=sam-laptop.tail1234.ts.net:8004 --directory sam-laptop.tail1234.ts.net:8100
+   ```
+
    This writes `kits/hospital-a.zip` and so on, plus `kits/directory/`, your hub kit
    with a filled `hub.env`. It also prints the network's shared secret; keep it.
    Send each hospital its own zip privately. A kit holds that hospital's keys.
-2. **Start the hub:** `make hub`. This is
-   `docker compose --project-directory . --env-file kits/directory/hub.env -f deploy/hub.yml up -d --wait`.
+2. **Start the hub:** `make hub`. Without `make` (a stock Windows laptop has none),
+   run what it runs, from the repository folder:
+
+   ```sh
+   docker compose --project-directory . --env-file kits/directory/hub.env -f deploy/hub.yml up -d --wait
+   ```
+
    The dashboard is at <http://localhost:8080>. Postgres listens on this laptop
    only. The directory and the observer listen on `HUB_BIND_IP`: your Tailscale IP,
    if `--directory` was one, or every interface otherwise.
 3. **Run a hospital yourself**, for example the mid-run joiner:
-   `make node KIT=kits/hospital-d`. This is the same `deploy/node.yml` a friend runs.
+   `make node KIT=kits/hospital-d`. This is the same `deploy/node.yml` a friend runs;
+   without `make`: `docker compose --project-directory kits/hospital-d -f kits/hospital-d/deploy/node.yml up -d`.
 4. **Start training** from the dashboard, or from any hospital with the `curl`
    command in its kit's `README.md`.
 
