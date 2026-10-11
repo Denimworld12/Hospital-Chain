@@ -119,7 +119,11 @@ def test_a_hospital_enrolls_with_a_join_code_and_joins_the_chain(hub, tmp_path, 
     (port,) = free_ports(1)
     kit = tmp_path / "kit"
     assert enroll.main(["--hub", hub.hub, "--name", "  St  Mary's   Leeds ", "--code", code, "--advertise", "127.0.0.1",
-                        "--port", str(port), "--out", str(kit)]) == 0
+                        "--port", str(port), "--out", str(kit), "--host-name", "ALEX-LAPTOP",
+                        "--host-os", "Microsoft Windows 11 Home  10.0.22631", "--tailscale-device", "alex-laptop"]) == 0
+    env = (kit / ".env").read_text()
+    assert "MEDCHAIN_HOST_NAME=ALEX-LAPTOP\n" in env and "MEDCHAIN_HOST_OS=Microsoft Windows 11 Home 10.0.22631\n" in env
+    assert "MEDCHAIN_HOST_BOOTED_AT" not in env
     hub.nodes.append(NodeServer(hub.cfgs["hospital-a"]).start())  # a kit hospital, before the kit's env is set
 
     node_id = kit_env(monkeypatch, kit)

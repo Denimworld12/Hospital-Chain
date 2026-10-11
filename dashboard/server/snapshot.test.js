@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { commFrom, consensusFrom, currentTopology, hospitalsByRound, networkLossFrom } from "./snapshot.js";
+import { commFrom, consensusFrom, currentTopology, hospitalsByRound, networkLossFrom, proofsFrom } from "./snapshot.js";
 import { W, chainLinks, chainMembers, layout } from "../src/topologyLayout.js";
 
 const EPS = 1e-3;
@@ -149,7 +149,12 @@ test("network training loss: a round counts only once every member of its chain 
   assert.ok(!rounds.includes(7) && !rounds.includes(12));
   assert.ok(rounds.includes(6) && rounds.includes(11));
   // rows from before chain_size existed fall back to the registered member count
-  const legacy = metricsRows(3).map(({ chain_size, epoch, ...r }) => r);
+  const legacy = metricsRows(3).map((row) => {
+    const r = { ...row };
+    delete r.chain_size;
+    delete r.epoch;
+    return r;
+  });
   assert.equal(networkLossFrom(legacy, 4).length, 3);
   assert.equal(networkLossFrom(legacy, 5).length, 0);
 });
@@ -203,4 +208,26 @@ test("topology layout: a member without a node row yet still gets a placeholder"
   const placed = chainMembers({ chain: ["hospital-a", "hospital-e"] }, [{ node_id: "hospital-a", status: "alive" }]);
   assert.equal(placed[1].node_id, "hospital-e");
   assert.equal(placed[1].status, "down");
+});
+
+test("proof of origin: verified only while the newest signed message is fresh and was accepted", () => {
+  const msg = { host: { hostname: "alex-laptop" }, data_rows: 62 };
+  const rows = [
+    { node_id: "st-marys-3f9a", display_name: "St Mary's", enrolled: true, seconds_since_proof: 4, message: msg,
+      key_fingerprint: "ab12" },
+    { node_id: "hospital-b", seconds_since_proof: 120, message: msg },
+    { node_id: "hospital-c", seconds_since_proof: 20, seconds_since_rejection: 3, rejection: "signature: does not verify" },
+    { node_id: "hospital-d", seconds_since_rejection: 9, rejection: "no signing key is on record" },
+    { node_id: "hospital-e", seconds_since_proof: 2, seconds_since_rejection: 50, rejection: "old" },
+  ];
+  const out = Object.fromEntries(proofsFrom(rows, 35).map((p) => [p.node_id, p]));
+  assert.equal(out["st-marys-3f9a"].status, "verified");
+  assert.equal(out["st-marys-3f9a"].display_name, "St Mary's");
+  assert.equal(out["hospital-b"].status, "stale");
+  assert.equal(out["hospital-b"].display_name, "hospital-b");
+  assert.equal(out["hospital-c"].status, "rejected");
+  assert.equal(out["hospital-c"].rejection, "signature: does not verify");
+  assert.equal(out["hospital-d"].status, "rejected");
+  assert.equal(out["hospital-e"].status, "verified", "a later accepted message clears an older refusal");
+  assert.equal(out["hospital-e"].rejection, null);
 });

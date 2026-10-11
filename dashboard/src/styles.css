@@ -660,6 +660,14 @@ a {
   background: var(--color-mint-sage);
 }
 
+.status-pill--orange {
+  background: var(--color-burnt-orange);
+}
+
+.status-pill--grey {
+  background: var(--color-soft-shadow);
+}
+
 /* ---- Consensus panel ------------------------------------------------------- */
 
 .consensus {

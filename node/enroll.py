@@ -232,8 +232,19 @@ def _write(path: Path, data: str | bytes, private: bool = False) -> None:
             pass
 
 
+def host_env(facts: dict[str, str | None]) -> list[str]:
+    """The host's facts for the proof-of-origin messages (node/proof.py), as the install script read them."""
+    from .proof import HOST_ENV
+
+    clean = {k: " ".join(str(v).split()) for k, v in facts.items() if v}
+    if not clean:
+        return []
+    return ["# This computer, as the install script read it (node/proof.py signs and sends these to the hub)",
+            *(f"{HOST_ENV[k]}={v}" for k, v in clean.items())]
+
+
 def kit_env(answer: dict, hub_host: str, hub_port: int, advertise: str, port: int, image_version: str,
-            image: str | None) -> str:
+            image: str | None, facts: dict[str, str | None] | None = None) -> str:
     host = f"[{hub_host}]" if ":" in hub_host else hub_host
     lines = [
         f"# MedChain hospital node settings for {answer['display_name']} ({answer['node_id']}), written by",
@@ -252,6 +263,7 @@ def kit_env(answer: dict, hub_host: str, hub_port: int, advertise: str, port: in
         "ROUND_TIMEOUT_S=15",
         "HTTP_CONNECT_TIMEOUT_S=5",
         "HTTP_READ_TIMEOUT_S=10",
+        *host_env(facts or {}),
     ]
     return "\n".join(lines) + "\n"
 
@@ -319,6 +331,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--image-version", default=os.environ.get("IMAGE_VERSION") or IMAGE_VERSION)
     ap.add_argument("--image", default=os.environ.get("MEDCHAIN_IMAGE") or None, help="the node image repository")
     ap.add_argument("--force", action="store_true", help="enroll again even if --out already holds an enrolled kit")
+    ap.add_argument("--host-name", help="this computer's name (for the dashboard's proof of origin)")
+    ap.add_argument("--host-os", help="its operating system and version")
+    ap.add_argument("--host-booted-at", help="when it booted, Unix seconds (its uptime is counted from this)")
+    ap.add_argument("--tailscale-device", help="its Tailscale device name")
     args = ap.parse_args(argv)
 
     existing = enrolled_id(args.out)
@@ -339,8 +355,10 @@ def main(argv: list[str] | None = None) -> int:
     except (EnrollError, ValueError) as exc:
         print(f"enroll: {exc}", file=sys.stderr)
         return 2
+    host = {"hostname": args.host_name, "os": args.host_os, "booted_at": args.host_booted_at,
+            "tailscale_device": args.tailscale_device}
     write_kit(args.out, answer, keys, kit_env(answer, hub_host, hub_port, advertise, args.port, args.image_version,
-                                              args.image))
+                                              args.image, host))
     print(f"enrolled {answer['display_name']} as {answer['node_id']} (data: {answer['data_slice']['name']}); "
           f"kit written to {args.out}")
     return 0

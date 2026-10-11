@@ -42,7 +42,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from . import discovery, pinning, rejoin, security, wire
+from . import discovery, pinning, proof, rejoin, security, wire
 from .assess.routes import Assessor, build_router as build_assess_router
 from .config import NodeConfig, load_config
 from .db import Database, NullDatabase
@@ -54,6 +54,8 @@ from .trainer import LocalTrainer
 from .writer import DbWriter, ObserverSink
 
 log = logging.getLogger("medchain.node")
+
+PROOF_INTERVAL_S = float(os.environ.get("PROOF_INTERVAL_S", "10"))
 
 
 class StartRequest(BaseModel):
@@ -112,6 +114,8 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
     def expected_pins(host: str, port: int) -> list[pinning.Pin]:
         """Whose key may answer at host:port: the directory (pinned by my kit) or a member of my signed chain."""
         parties = [("directory", "the directory", cfg.directory.url, directory_pin)] if cfg.directory else []
+        if cfg.observer and cfg.tls:  # the proof-of-origin messages go to the observer on this client
+            parties.append(("observer", "the observer", cfg.observer.url, cfg.observer.tls_pin))
         if "runner" in state:
             parties += state["runner"].known_parties()
         return pinning.pins_at(host, port, parties)
@@ -134,6 +138,19 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         while True:
             db.heartbeat(cfg.node_id, runner.run_id, runner.state, runner.current_round)
             await asyncio.sleep(cfg.timing.heartbeat_interval_s)
+
+    async def proof_loop(runner: Runner, prover: proof.Prover) -> None:
+        """Signed facts about this machine, for the dashboard (node/proof.py). Never waited for by training."""
+        while True:
+            try:
+                body, headers = prover.message(await proof.neighbour_rtts(runner.client, runner.neighbours))
+                resp = await runner.client.post(f"{cfg.observer.url}/proof", content=body,
+                                                headers={**headers, "Authorization": f"Bearer {cfg.observer.token}"})
+                if resp.status_code != 200:
+                    log.warning("observer refused my proof-of-origin message: %s %s", resp.status_code, resp.text[:200])
+            except httpx.HTTPError as exc:
+                log.debug("proof-of-origin message not delivered: %s", exc)
+            await asyncio.sleep(PROOF_INTERVAL_S)
 
     def take_membership(doc: Membership, via: str) -> str:
         """Verify the directory's signature, then apply or schedule the document."""
@@ -228,6 +245,9 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
                          "directory": cfg.directory.url if cfg.directory else None, "tls": bool(cfg.tls),
                          "signed_updates": signing_key is not None})
         hb = asyncio.create_task(heartbeat_loop(runner))
+        if cfg.observer and signing_key is not None:
+            state["proof"] = asyncio.create_task(proof_loop(runner, proof.Prover(
+                cfg.node_id, signing_key, trainer.n_patients, cfg.image_version)))
         if cfg.directory:
             state["rejoin"] = asyncio.create_task(register_with_directory(runner))
         elif cfg.is_admm:  # a checkpoint on the volume means we were killed mid-run: rejoin it
@@ -238,7 +258,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             yield
         finally:
             hb.cancel()
-            for t in (state.get("rejoin"), state.get("fetch")):
+            for t in (state.get("rejoin"), state.get("fetch"), state.get("proof")):
                 if t:
                     t.cancel()
             await runner.shutdown()

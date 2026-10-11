@@ -7,12 +7,14 @@ import TrainingMonitor from "./pages/TrainingMonitor.jsx";
 import Communication from "./pages/Communication.jsx";
 import AuditLog from "./pages/AuditLog.jsx";
 import Assessment from "./pages/Assessment.jsx";
+import Nodes from "./pages/Nodes.jsx";
 import { control, useSnapshot } from "./useSnapshot.js";
 
 const ROUTES = [
   { hash: "#/", label: "Topology" },
   { hash: "#/training", label: "Training monitor" },
   { hash: "#/communication", label: "Communication" },
+  { hash: "#/nodes", label: "Nodes" },
   { hash: "#/audit", label: "Audit log" },
   { hash: "#/assessment", label: "Risk assessment" },
 ];
@@ -112,6 +114,7 @@ export default function App() {
         )}
         {route === "#/training" && <TrainingMonitor snapshot={snapshot} />}
         {route === "#/communication" && <Communication snapshot={snapshot} />}
+        {route === "#/nodes" && <Nodes snapshot={snapshot} />}
         {route === "#/audit" && <AuditLog snapshot={snapshot} />}
         {route === "#/assessment" && <Assessment snapshot={snapshot} />}
       </main>

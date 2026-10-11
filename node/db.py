@@ -117,6 +117,18 @@ CREATE TABLE IF NOT EXISTS hospital_keys (
     enrolled              BOOLEAN NOT NULL DEFAULT false,
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- written by the observer only: each hospital's latest proof-of-origin message (node/proof.py), signature checked
+CREATE TABLE IF NOT EXISTS node_proofs (
+    node_id         TEXT PRIMARY KEY,
+    received_at     TIMESTAMPTZ,
+    sent_at         DOUBLE PRECISION,
+    boot_id         TEXT,
+    seq             INTEGER,
+    message         JSONB,
+    key_fingerprint TEXT,
+    rejected_at     TIMESTAMPTZ,
+    rejection       TEXT
+);
 """
 
 SCHEMA_LOCK_KEY = 4242_0001
@@ -268,6 +280,26 @@ class Database:
                    observer_token_sha256 = COALESCE(EXCLUDED.observer_token_sha256, hospital_keys.observer_token_sha256),
                    updated_at = now()""",
             (node_id, display_name, signing_public_key, tls_pin, observer_token_sha256, enrolled),
+        )
+
+
+    def proof_accepted(self, *, node_id: str, sent_at: float, boot_id: str, seq: int, message: dict,
+                       key_fingerprint: str) -> None:
+        """The observer verified this hospital's proof-of-origin message (never written through /ingest)."""
+        self._execute(
+            """INSERT INTO node_proofs (node_id, received_at, sent_at, boot_id, seq, message, key_fingerprint)
+               VALUES (%s, now(), %s, %s, %s, %s::jsonb, %s)
+               ON CONFLICT (node_id) DO UPDATE SET received_at = now(), sent_at = EXCLUDED.sent_at,
+                   boot_id = EXCLUDED.boot_id, seq = EXCLUDED.seq, message = EXCLUDED.message,
+                   key_fingerprint = EXCLUDED.key_fingerprint""",
+            (node_id, sent_at, boot_id, seq, json.dumps(message), key_fingerprint),
+        )
+
+    def proof_rejected(self, *, node_id: str, reason: str) -> None:
+        self._execute(
+            """INSERT INTO node_proofs (node_id, rejected_at, rejection) VALUES (%s, now(), %s)
+               ON CONFLICT (node_id) DO UPDATE SET rejected_at = now(), rejection = EXCLUDED.rejection""",
+            (node_id, reason),
         )
 
 

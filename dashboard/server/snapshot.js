@@ -8,6 +8,8 @@
 // pure functions below, which are unit-tested (snapshot.test.js).
 
 export const STALE_AFTER_S = Number(process.env.HEARTBEAT_STALE_S || 7);
+// node/proof.py sends a signed proof-of-origin message every 10 s; older than this, it no longer counts as live
+export const PROOF_STALE_S = Number(process.env.PROOF_STALE_S || 35);
 const AUDIT_ROWS = Number(process.env.AUDIT_ROWS || 80);
 
 const edgeKey = (a, b) => `${a}|${b}`;
@@ -153,6 +155,43 @@ export function commFrom(perRoundRows, topology, hospitals = new Map()) {
   };
 }
 
+// Proof of origin per hospital (node/proof.py, checked by the observer): "verified" while its newest signed
+// message is fresh and newer than any refused one, "rejected" when the newest thing it sent was refused,
+// "stale" once it goes quiet, "none" if the observer never accepted one from it.
+export function proofsFrom(rows, staleAfter = PROOF_STALE_S) {
+  return rows.map((r) => {
+    const since = r.seconds_since_proof;
+    const rejectedSince = r.seconds_since_rejection;
+    let status = "none";
+    if (rejectedSince != null && (since == null || rejectedSince < since)) status = "rejected";
+    else if (since != null) status = since <= staleAfter ? "verified" : "stale";
+    return {
+      node_id: r.node_id,
+      display_name: r.display_name || r.node_id,
+      enrolled: !!r.enrolled,
+      status,
+      seconds_since_proof: since,
+      key_fingerprint: r.key_fingerprint || null,
+      rejection: status === "rejected" ? r.rejection : null,
+      message: r.message || null,
+    };
+  });
+}
+
+async function proofRows(pool) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.node_id, p.message, p.key_fingerprint, p.rejection, k.display_name, k.enrolled,
+              EXTRACT(EPOCH FROM (now() - p.received_at))::float AS seconds_since_proof,
+              EXTRACT(EPOCH FROM (now() - p.rejected_at))::float AS seconds_since_rejection
+         FROM node_proofs p LEFT JOIN hospital_keys k USING (node_id) ORDER BY p.node_id`,
+    );
+    return rows;
+  } catch {
+    return []; // an observer older than node_proofs has not created the table
+  }
+}
+
 export async function buildSnapshot(pool) {
   const nodesRes = await pool.query(
     `SELECT node_id, display_name, url, patients, neighbours, engine, run_id, run_state, current_round,
@@ -230,6 +269,7 @@ export async function buildSnapshot(pool) {
     consensus,
     comm,
     audit: auditRes.rows,
+    proofs: proofsFrom(await proofRows(pool)),
   };
 }
 

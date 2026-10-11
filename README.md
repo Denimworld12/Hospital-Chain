@@ -717,6 +717,26 @@ directory needs the CA key for this: `provision.py` puts it in the hub kit
 (`pki/ca.key`), and `deploy/hub.yml` mounts `data/slices/` and
 `config/hospital-a.yaml` (the engine settings) into it.
 
+### Proof of origin on the dashboard
+
+Every node with a signing key and an observer sends the observer a status message every
+10 seconds (`node/proof.py`, `POST /proof`), signed with the Ed25519 key that signs its
+training updates. It holds the computer's hostname, OS and version, uptime and Tailscale
+device name (read on the host by the install script; without it, what the container
+sees, labelled as such), the round-trip time it measures right then to each chain
+neighbour over the pinned TLS links training uses, and how many data rows it holds (the
+count only). It also carries a per-start boot id and a rising sequence number.
+
+The observer checks the signature against the key the directory has on record for that
+hospital (`hospital_keys`, written by the directory when the hospital registers or
+enrolls). It refuses a message that does not verify, comes from a hospital with no key
+on record, is a replay or is more than 10 minutes old, and writes each refusal to the
+audit log (`proof_rejected`). The dashboard's **Nodes** page shows each hospital's facts
+with a **Signature verified** badge and the key's fingerprint, or **Rejected** with the
+reason. This is in addition to the Start/Pause controls. One limit: the host's uptime
+counts from the boot time the install script saw, so after a reboot, run the installer
+again to refresh it. The round-trip times and data rows are always live.
+
 ### Prove it
 
 `scripts/verify_multihost.py` is the acceptance test, on real laptops or on one
