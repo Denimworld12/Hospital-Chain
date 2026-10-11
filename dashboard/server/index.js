@@ -18,6 +18,7 @@ import { WebSocketServer } from "ws";
 import { buildSnapshot, latestUpdateId, STALE_AFTER_S, updatesSince } from "./snapshot.js";
 import { Auth, sameOrigin, sessionCookie } from "./auth.js";
 import { directoryAdmin } from "./admin.js";
+import { relayTo } from "./relay.js";
 
 const PORT = Number(process.env.PORT || 8080);
 const DIST = process.env.DASHBOARD_DIST || fileURLToPath(new URL("../dist", import.meta.url));
@@ -57,7 +58,7 @@ async function readJson(req) {
   }
 }
 
-// Relay a button press to one alive chain member; the node floods it to its neighbours.
+// Relay a button press to the alive chain members (server/relay.js decides which ones).
 // (A hospital that left the chain has no neighbours to flood to, so it is skipped.)
 async function relay(action, body) {
   const { rows } = await pool.query(
@@ -65,24 +66,15 @@ async function relay(action, body) {
       ORDER BY node_id`,
     [STALE_AFTER_S],
   );
-  if (!rows.length) return { status: 503, body: { detail: "No hospital node is alive." } };
-  let last = null;
-  for (const node of rows) {
-    try {
-      const resp = await fetch(`${node.url}/round/${action}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-MedChain-Secret": SHARED_SECRET },
-        body: JSON.stringify(action === "start" ? { rounds: body.rounds, initiated_by: "dashboard" } : {}),
-        signal: AbortSignal.timeout(8000),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (resp.ok || resp.status === 409) return { status: resp.status, body: { via: node.node_id, ...data } };
-      last = { status: resp.status, body: { via: node.node_id, ...data } };
-    } catch (err) {
-      last = { status: 502, body: { detail: `${node.node_id} unreachable: ${err.message}` } };
-    }
-  }
-  return last;
+  return relayTo(action, body, rows, async (node, payload) => {
+    const resp = await fetch(`${node.url}/round/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-MedChain-Secret": SHARED_SECRET },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(8000),
+    });
+    return { status: resp.status, data: await resp.json().catch(() => ({})) };
+  });
 }
 
 const MAX_ASSESS_BYTES = 16 * 1024 * 1024;

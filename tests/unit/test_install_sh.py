@@ -15,6 +15,7 @@ STUBS = {
     "docker": """\
         echo "docker $*" >>"$STUB_LOG"
         case " $* " in *" exec "*) echo "registration"; exit "${REGISTER_EXIT:-0}" ;; esac
+        case " $* " in *" down "*) exit "${DOWN_EXIT:-0}" ;; esac
         case "$1" in
           run)
             kit=$(printf '%s\\n' "$@" | sed -n 's/:\\/kit$//p')
@@ -100,6 +101,10 @@ def test_a_hospital_the_organiser_removed_is_told_so_instead_of_done(tmp_path):
     assert r.returncode == 1 and "Done" not in r.stdout
     assert "organiser removed this computer" in r.stderr and "new join code" in r.stderr
     assert calls.splitlines()[-1].endswith("down"), "the refused node is stopped, not left retrying"
+    # a Docker hiccup while stopping it still reports the refusal
+    r, _ = run_installer(tmp_path, REGISTER_EXIT="3", DOWN_EXIT="1")
+    assert r.returncode == 1 and "Done" not in r.stdout
+    assert "organiser removed this computer" in r.stderr
     # one that is simply slow to reach the hub still finishes, saying it keeps trying
     r, _ = run_installer(tmp_path, REGISTER_EXIT="1", MEDCHAIN_REGISTER_TRIES="1")
     assert r.returncode == 0 and "keeps trying" in r.stdout and "Done" in r.stdout

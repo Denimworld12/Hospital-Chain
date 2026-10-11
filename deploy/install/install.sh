@@ -175,9 +175,11 @@ for _ in $(seq 1 "$REGISTER_TRIES"); do
   line=$(docker compose --project-directory "$DIR" -f "$DIR/deploy/node.yml" exec -T node python -m node.registered 2>/dev/null)
   code=$?
   [ $code -eq 0 ] && { registered=1; break; }
-  [ $code -eq 3 ] && docker compose --project-directory "$DIR" -f "$DIR/deploy/node.yml" down >/dev/null 2>&1 &&
+  [ $code -eq 3 ] && {
+    docker compose --project-directory "$DIR" -f "$DIR/deploy/node.yml" down >/dev/null 2>&1
     problem "The organiser removed this computer from the network: the hub refuses its keys (${line#the hub refuses this hospital: })." \
-    "Delete the folder $DIR, ask the organiser for a new join code, then run the same command again."
+      "Delete the folder $DIR, ask the organiser for a new join code, then run the same command again."
+  }
   sleep 3
 done
 [ -n "$registered" ] || printf '  (it has not reached the hub yet; it keeps trying by itself. If this lasts, check the hub address with the organiser.)\n'

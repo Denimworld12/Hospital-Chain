@@ -297,8 +297,8 @@ needs a new kit), set `IMAGE_VERSION=v1.1.0` in the new `kits/directory/hub.env`
 `MEDCHAIN_ADMIN_PASSWORD`, and run `make hub` again.
 
 **A run that cannot finish** (a hospital went dark mid-run, so its neighbour waits out
-every round): press **Stop** next to Pause on the dashboard. It ends the run on every
-hospital it reaches; then remove the dark one (below) and start again.
+every round): press **Stop** next to Pause on the dashboard. The dashboard sends it to
+every hospital that is still alive, so the ones beyond the dark one stop too; then remove the dark one (below) and start again.
 
 **A laptop that is off or gone.** A hospital that never answers splits the chain: the
 hospitals beyond it never hear "start". Once the run ends, the control strip says it was
