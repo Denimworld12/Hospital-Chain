@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { UNAUTHORIZED, notAuthorized } from "./auth.js";
 
 // "update" events (one per POST /update a node logged) go to subscribers instead of React state,
 // so a busy run animates envelopes without re-rendering the whole dashboard.
@@ -37,6 +38,10 @@ export function useSnapshot() {
       ws.onclose = () => {
         if (closed) return;
         setConnection("reconnecting");
+        // a refused upgrade looks like any close: ask whether the session ended
+        fetch("/api/auth/me").then((r) => r.json()).then((me) => {
+          if (!me.authenticated) window.dispatchEvent(new Event(UNAUTHORIZED));
+        }).catch(() => {});
         const delay = Math.min(5000, 500 * 2 ** retry.current++);
         timer = setTimeout(connect, delay);
       };
@@ -59,6 +64,7 @@ export async function control(action, body = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  notAuthorized(res);
   const data = await res.json().catch(() => ({}));
   return { ok: res.ok, ...data };
 }

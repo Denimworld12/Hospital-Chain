@@ -6,6 +6,7 @@ Endpoints
     POST /round/start     start (or join) a training run; floods to neighbours
     POST /round/pause     pause at the next round boundary; floods
     POST /round/resume    resume a paused run; floods
+    POST /round/stop      end the run now (the organiser's Stop, e.g. a neighbour is gone); floods
     POST /update          receive a neighbour's update (the engine's packet bytes)
     GET  /snapshot        ADMM engines: my full theta_hat for a restarted/drifted/new neighbour
     GET  /metrics         this node's per-round metrics for the current/last run
@@ -42,7 +43,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from . import discovery, pinning, rejoin, security, wire
+from . import discovery, pinning, proof, rejoin, security, wire
 from .assess.routes import Assessor, build_router as build_assess_router
 from .config import NodeConfig, load_config
 from .db import Database, NullDatabase
@@ -54,6 +55,8 @@ from .trainer import LocalTrainer
 from .writer import DbWriter, ObserverSink
 
 log = logging.getLogger("medchain.node")
+
+PROOF_INTERVAL_S = float(os.environ.get("PROOF_INTERVAL_S", "10"))
 
 
 class StartRequest(BaseModel):
@@ -112,6 +115,8 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
     def expected_pins(host: str, port: int) -> list[pinning.Pin]:
         """Whose key may answer at host:port: the directory (pinned by my kit) or a member of my signed chain."""
         parties = [("directory", "the directory", cfg.directory.url, directory_pin)] if cfg.directory else []
+        if cfg.observer and cfg.tls:  # the proof-of-origin messages go to the observer on this client
+            parties.append(("observer", "the observer", cfg.observer.url, cfg.observer.tls_pin))
         if "runner" in state:
             parties += state["runner"].known_parties()
         return pinning.pins_at(host, port, parties)
@@ -134,6 +139,19 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         while True:
             db.heartbeat(cfg.node_id, runner.run_id, runner.state, runner.current_round)
             await asyncio.sleep(cfg.timing.heartbeat_interval_s)
+
+    async def proof_loop(runner: Runner, prover: proof.Prover) -> None:
+        """Signed facts about this machine, for the dashboard (node/proof.py). Never waited for by training."""
+        while True:
+            await asyncio.sleep(PROOF_INTERVAL_S)  # the first one after registration has had a moment
+            try:
+                body, headers = prover.message(await proof.neighbour_rtts(runner.client, runner.neighbours))
+                resp = await runner.client.post(f"{cfg.observer.url}/proof", content=body,
+                                                headers={**headers, "Authorization": f"Bearer {cfg.observer.token}"})
+                if resp.status_code != 200:
+                    log.warning("observer refused my proof-of-origin message: %s %s", resp.status_code, resp.text[:200])
+            except httpx.HTTPError as exc:
+                log.debug("proof-of-origin message not delivered: %s", exc)
 
     def take_membership(doc: Membership, via: str) -> str:
         """Verify the directory's signature, then apply or schedule the document."""
@@ -183,12 +201,17 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         while doc is None:
             try:
                 doc, joined = await discovery.register(r.client, cfg, r.public_key, trainer.n_patients, r.tls_pin)
+                state["registration"] = {"state": "registered", "detail": None}
                 break
             except discovery.DirectoryError as exc:
                 if pinning.is_pin_error(exc):
                     db.audit(node_id=cfg.node_id, event="tls_pin_mismatch", receiver="directory",
                              detail={"reason": str(exc.__cause__ or exc)})
                 log.warning("directory registration failed (%s); retrying in %.0fs", exc, delay)
+                # refused (401/403): the directory does not know this hospital's credential or keys any more,
+                # e.g. the organiser removed it; the install scripts tell the person instead of reporting success
+                state["registration"] = {"state": "refused" if exc.status in (401, 403) else "retrying",
+                                         "detail": str(exc)}
                 unreachable = exc.unreachable
             if unreachable and r.saved and await rejoin_from_saved(r) == "accepted":
                 rejoined = True
@@ -228,17 +251,20 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
                          "directory": cfg.directory.url if cfg.directory else None, "tls": bool(cfg.tls),
                          "signed_updates": signing_key is not None})
         hb = asyncio.create_task(heartbeat_loop(runner))
+        if cfg.observer and signing_key is not None:
+            state["proof"] = asyncio.create_task(proof_loop(runner, proof.Prover(
+                cfg.node_id, signing_key, trainer.n_patients, cfg.image_version)))
         if cfg.directory:
             state["rejoin"] = asyncio.create_task(register_with_directory(runner))
         elif cfg.is_admm:  # a checkpoint on the volume means we were killed mid-run: rejoin it
             state["rejoin"] = asyncio.create_task(runner.rejoin())
-        log.info("%s up on :%d (%s) with %d patients, neighbours=%s, engine=%s", cfg.node_id, cfg.port, cfg.scheme,
-                 trainer.n_patients, nbs, engine.label)
+        log.info("%s (%s) up on :%d (%s) with %d patients, neighbours=%s, engine=%s", cfg.display_name, cfg.node_id,
+                 cfg.port, cfg.scheme, trainer.n_patients, nbs, engine.label)
         try:
             yield
         finally:
             hb.cancel()
-            for t in (state.get("rejoin"), state.get("fetch")):
+            for t in (state.get("rejoin"), state.get("fetch"), state.get("proof")):
                 if t:
                     t.cancel()
             await runner.shutdown()
@@ -304,6 +330,9 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             "current_round": r.current_round,
             "total_rounds": r.total_rounds,
             "uptime_s": round(time.time() - started_at, 1),
+            # with a directory: registered / retrying / refused (node/registered.py reads it for the install scripts)
+            "registration": state.get("registration") or {"state": "registering" if cfg.directory else "static",
+                                                          "detail": None},
             "assess": assessor.status(),
         }
 
@@ -323,6 +352,8 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             raise HTTPException(409, detail=f"{cfg.node_id} is already in run {r.run_id} ({r.state})")
         if outcome == "not-in-chain":
             raise HTTPException(409, detail=f"{cfg.node_id} is not in the chain (epoch {r.epoch})")
+        if outcome == "alone":
+            raise HTTPException(409, detail=f"{cfg.node_id} is alone in the chain: a run needs another hospital to join")
         forwarded = {}
         if outcome == "started":
             # tell neighbours first so they are listening before our first /update arrives
@@ -337,10 +368,12 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
         op_id = req.op_id or f"{action}-{secrets.token_hex(6)}"
         if r.seen_op(op_id):
             return {"status": "seen", "node_id": cfg.node_id}
-        changed = r.pause() if action == "pause" else r.resume()
+        run_id = r.run_id
+        changed = {"pause": r.pause, "resume": r.resume, "stop": r.stop}[action]()
         forwarded = await flood(f"/round/{action}", {"op_id": op_id, "origin": cfg.node_id}, req.origin)
-        return {"status": ("paused" if action == "pause" else "running") if changed else r.state,
-                "node_id": cfg.node_id, "run_id": r.run_id, "forwarded": forwarded}
+        done = {"pause": "paused", "resume": "running", "stop": "stopped"}[action]
+        return {"status": done if changed else r.state, "node_id": cfg.node_id, "run_id": run_id,
+                "forwarded": forwarded}
 
     @app.post("/round/pause", dependencies=peer_only)
     async def round_pause(req: ControlRequest | None = None):
@@ -349,6 +382,10 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
     @app.post("/round/resume", dependencies=peer_only)
     async def round_resume(req: ControlRequest | None = None):
         return await control("resume", req or ControlRequest())
+
+    @app.post("/round/stop", dependencies=peer_only)
+    async def round_stop(req: ControlRequest | None = None):
+        return await control("stop", req or ControlRequest())
 
     @app.post("/update", dependencies=peer_only)
     async def update(request: Request):

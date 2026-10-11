@@ -99,3 +99,175 @@ def test_a_node_pushes_its_telemetry_to_the_observer_over_pinned_tls(tmp_path):
     finally:
         node.stop(abrupt=True)
         observer.stop(abrupt=True)
+
+
+class KeysDatabase(RecordingDatabase):
+    """hospital_keys as the directory wrote them: one enrolled hospital with its own token."""
+
+    def __init__(self, owners: dict[str, str], keys: dict[str, str] | None = None):
+        super().__init__()
+        self.owners, self.keys = owners, keys or {}
+        self.proofs: list[dict] = []
+        self.rejections: list[dict] = []
+
+    def fetch(self, sql, params=None):
+        if "observer_token_sha256" in sql:
+            return [(self.owners[params[0]],)] if params[0] in self.owners else []
+        if "signing_public_key" in sql:
+            return [(self.keys[params[0]],)] if params[0] in self.keys else []
+        return [(1,)] if params[0] in self.keys else []
+
+    def proof_accepted(self, **kw):
+        self.proofs.append(kw)
+
+    def proof_rejected(self, **kw):
+        self.rejections.append(kw)
+
+    def heartbeat(self, node_id, run_id, run_state, current_round):
+        self.audits.append({"event": "heartbeat", "node_id": node_id})
+
+
+def test_an_enrolled_hospitals_own_token_writes_only_as_that_hospital(tmp_path):
+    import hashlib
+
+    from chain_harness import free_ports, issue_pki
+
+    pki_dir = issue_pki(tmp_path, ["hospital-a"])
+    pki.ensure_identity(pki_dir, "observer", ["127.0.0.1", "localhost"], credential=False)
+    own = "node-1-own-token"
+    db = KeysDatabase({hashlib.sha256(own.encode()).hexdigest(): "node-1"})
+    (port,) = free_ports(1)
+    observer = ObserverServer(port, pki_dir, db).start()
+    try:
+        url, ca = f"{observer.url}/ingest", str(pki_dir / "ca.crt")
+
+        def post(token, node_id, items):
+            return httpx.post(url, json={"node_id": node_id, "items": items}, verify=ca, timeout=5,
+                              headers={"Authorization": f"Bearer {token}"})
+
+        beat = lambda n: {"kind": "heartbeat", "payload": {"node_id": n, "run_id": None, "run_state": "idle",  # noqa: E731
+                                                          "current_round": 0}}
+        assert post(own, "node-1", [beat("node-1")]).json()["applied"] == 1
+        assert post(own, "hospital-a", [beat("hospital-a")]).status_code == 403, "another hospital's batch"
+        # in its own batch, only a row written as another hospital is refused, never the rest of the batch
+        received = {"kind": "audit", "payload": {"node_id": "node-1", "event": "update_received", "sender": "hospital-a",
+                                                 "receiver": "node-1"}}
+        sent = {"kind": "update_sent", "payload": {"run_id": "r", "round_num": 1, "sender": "node-1",
+                                                   "receiver": "hospital-a", "payload_bytes": 12,
+                                                   "full_precision_bytes": 128, "bits": 2, "dtype": "qgadmm-packet",
+                                                   "checksum": "c", "status": "delivered"}}
+        forged = {**sent, "payload": {**sent["payload"], "sender": "hospital-a", "receiver": "node-1"}}
+        r = post(own, "node-1", [received, beat("hospital-a"), sent, forged])
+        assert r.status_code == 200 and r.json()["applied"] == 2, r.json()
+        assert [x.split(":")[0] for x in r.json()["rejected"]] == ["1", "3"]
+        assert db.events("update_received")[0]["sender"] == "hospital-a"
+        assert post("not-a-token", "node-1", [beat("node-1")]).status_code == 401
+        # the network token still works for kit hospitals; neither token can write the directory's key records
+        assert post(TOKEN, "hospital-a", [beat("hospital-a")]).json()["applied"] == 1
+        keys = {"kind": "hospital_key", "payload": {"node_id": "node-1", "display_name": "x",
+                                                    "signing_public_key": None, "tls_pin": None}}
+        assert post(own, "node-1", [keys]).json()["applied"] == 0, "a key record, even as itself"
+        assert post(TOKEN, "hospital-a", [keys]).json()["applied"] == 0
+    finally:
+        observer.stop(abrupt=True)
+
+
+def test_proof_of_origin_is_accepted_only_with_the_hospitals_key_on_record(tmp_path):
+    import hashlib
+    import json
+
+    from chain_harness import free_ports, issue_pki
+    from node import proof, security, wire
+
+    pki_dir = issue_pki(tmp_path, ["hospital-a", "hospital-b"])
+    pki.ensure_identity(pki_dir, "observer", ["127.0.0.1", "localhost"], credential=False)
+    key_a = security.load_signing_key(pki_dir / "hospital-a" / "signing.key")
+    key_b = security.load_signing_key(pki_dir / "hospital-b" / "signing.key")
+    other = "node-1-own-token"
+    db = KeysDatabase({hashlib.sha256(other.encode()).hexdigest(): "node-1"},
+                      {"hospital-a": security.public_key_b64(key_a)})
+    (port,) = free_ports(1)
+    observer = ObserverServer(port, pki_dir, db).start()
+    try:
+        url, ca = f"{observer.url}/proof", str(pki_dir / "ca.crt")
+        auth = {"Authorization": f"Bearer {TOKEN}"}
+
+        def post(body, headers):
+            return httpx.post(url, content=body, headers={**headers, **auth}, verify=ca, timeout=5)
+
+        prover = proof.Prover("hospital-a", key_a, 303, "v1.1.0")
+        # naming a hospital without its token (none, a wrong one, another hospital's) is refused, and
+        # shows nothing against the hospital it names
+        body, headers = prover.message({"hospital-b": 4.2})
+        for token, status in ((None, 401), ("nope", 401), (other, 403)):
+            spoof = {"Authorization": f"Bearer {token}"} if token else {}
+            assert httpx.post(url, content=body, headers={**headers, **spoof}, verify=ca, timeout=5).status_code == status
+        assert not db.rejections and not db.events("proof_rejected")
+        r = post(body, headers)
+        assert r.status_code == 200 and r.json()["verified"], r.text
+        msg = db.proofs[-1]["message"]
+        assert msg["data_rows"] == 303 and msg["neighbours_rtt_ms"] == {"hospital-b": 4.2} and msg["host"]["hostname"]
+        assert post(body, headers).status_code == 403, "the same message twice is a replay"
+        # a changed fact, a message signed by another hospital's key, a hospital with no key on record
+        body, headers = prover.message({})
+        assert post(body.replace(b'"data_rows": 303', b'"data_rows": 999'), headers).status_code == 403
+        forged, fh = proof.Prover("hospital-a", key_b, 1, "x").message({})
+        assert post(forged, fh).status_code == 403
+        unknown, uh = proof.Prover("hospital-b", key_b, 1, "x").message({})
+        assert post(unknown, uh).status_code == 403
+        for _ in range(3):  # a node that keeps failing (it retries every 10 s) does not flood the audit log
+            assert post(forged, fh).status_code == 403
+        reasons = [a["detail"]["reason"] for a in db.events("proof_rejected")]
+        assert len(reasons) == 3, "one row per hospital and reason in the window: both bad signatures share one"
+        assert "replayed" in reasons[0] and "signature" in reasons[1]
+        assert "no signing key is on record for hospital-b" in reasons[2]
+        assert [r["node_id"] for r in db.rejections] == ["hospital-a"] * 6, "the dashboard still shows every one"
+        # a laptop whose clock is an hour slow (a Docker VM after sleep) still counts: the skew is only shown
+        slow = json.loads(prover.message({})[0])
+        slow["sent_at"] -= 3600
+        sb = json.dumps(slow).encode()
+        sh = {wire.H_SENDER: "hospital-a"}
+        sh[wire.H_SIGNATURE] = security.sign(key_a, sb, sh, "proof")
+        assert post(sb, sh).status_code == 200
+        assert 3590 < db.proofs[-1]["message"]["clock_skew_s"] < 3610
+    finally:
+        observer.stop(abrupt=True)
+
+
+def test_a_node_sends_signed_proof_of_origin_with_its_host_facts(tmp_path, monkeypatch):
+    import node.main as node_main
+    from chain_harness import free_ports
+    from node import security
+
+    monkeypatch.setattr(node_main, "PROOF_INTERVAL_S", 0.2)
+    monkeypatch.setenv("MEDCHAIN_HOST_NAME", "ALEX-LAPTOP")
+    monkeypatch.setenv("MEDCHAIN_HOST_OS", "Microsoft Windows 11 Home 10.0.22631")
+    monkeypatch.setenv("MEDCHAIN_HOST_BOOTED_AT", str(time.time() - 7200))
+    monkeypatch.setenv("MEDCHAIN_TAILSCALE_DEVICE", "alex-laptop.tail1234.ts.net")
+    cfgs = write_configs(tmp_path, ["hospital-a", "hospital-b"], engine="gossip", secure=True)
+    pki_dir = tmp_path / "pki"
+    pki.ensure_identity(pki_dir, "observer", ["127.0.0.1", "localhost"], credential=False)
+    keys = {n: security.public_key_b64(security.load_signing_key(pki_dir / n / "signing.key")) for n in cfgs}
+    db = KeysDatabase({}, keys)
+    (port,) = free_ports(1)
+    observer = ObserverServer(port, pki_dir, db).start()
+    nodes = []
+    try:
+        for cfg in cfgs.values():
+            cfg.write_text(cfg.read_text() + f"observer: {{url: {observer.url}, token: {TOKEN}, "
+                                             f"tls_pin: 'file:{pki_dir / 'observer' / 'tls.crt'}'}}\n")
+        for cfg in cfgs.values():
+            n = NodeServer(cfg)
+            n.app = create_node_app(n.cfg)
+            n._serve(n.app, n.cfg.port, n.cfg.tls.cert, n.cfg.tls.key, n.cfg.tls.ca)
+            nodes.append(n.start())
+        wait_until(lambda: any(p["node_id"] == "hospital-a" and p["message"]["neighbours_rtt_ms"].get("hospital-b")
+                               for p in db.proofs), 15, "a proof from hospital-a with a measured RTT to hospital-b")
+        msg = next(p["message"] for p in db.proofs if p["node_id"] == "hospital-a")
+        assert msg["host"]["hostname"] == "ALEX-LAPTOP" and msg["host"]["tailscale_device"].startswith("alex-laptop")
+        assert 7190 < msg["host"]["uptime_s"] < 7300 and msg["data_rows"] == 303
+        assert not db.events("proof_rejected")
+    finally:
+        for n in nodes:
+            n.stop(abrupt=True)
+        observer.stop(abrupt=True)

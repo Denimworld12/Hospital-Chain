@@ -260,6 +260,8 @@ class Runner:
         self._flush_pending()
         if not self.in_chain:
             return "not-in-chain"
+        if len(self.membership.chain) < 2:
+            return "alone"
         self.engine.reset()
         self.run_id = run_id
         self.total_rounds = rounds
@@ -345,6 +347,14 @@ class Runner:
         self._resume.set()
         self.db.audit(node_id=self.cfg.node_id, event="run_resumed", run_id=self.run_id, round_num=self.current_round)
         self.db.heartbeat(self.cfg.node_id, self.run_id, self.state, self.current_round)
+        return True
+
+    def stop(self) -> bool:
+        """End the run now (the organiser's Stop): its task is cancelled, so the loop ends it as "stopped"."""
+        if not self.active or self._task is None or self._task.done():
+            return False
+        self.db.audit(node_id=self.cfg.node_id, event="run_stopped", run_id=self.run_id, round_num=self.current_round)
+        self._task.cancel()
         return True
 
     async def shutdown(self) -> None:

@@ -70,6 +70,9 @@ jobs:
   docker-stack:
     name: docker build + pytest (live stack, kill, join and leave tests) - engine ${{ matrix.engine }}
     runs-on: ubuntu-latest
+    env:
+      # the dashboard's admin account for this throwaway stack (compose creates it; the tests log in with it)
+      MEDCHAIN_ADMIN_PASSWORD: ci-dashboard-admin-password
     strategy:
       fail-fast: false
       matrix:

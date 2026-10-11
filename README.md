@@ -175,7 +175,7 @@ docker compose ps
 | --- | --- | --- |
 | `pki` (container `medchain-pki`) | - | Runs once on start: `scripts/pki.py` issues the demo network CA, each node's, the directory's and the observer's TLS certificate, each node's Ed25519 update-signing key and each hospital's directory credential into `./.pki/` (gitignored). Later starts keep what exists. |
 | `directory` | 8100 | The membership directory (`directory/`): decides where a hospital sits in the chain and tells hospitals who to connect to when one joins or leaves. Its own SQLite store, not Postgres. See [The directory](#the-directory). |
-| `hospital-a` ... `hospital-d` | 8001 ... 8004 | FastAPI node over HTTPS: `GET /health`, `GET /status`, `POST /round/start`, `POST /update`, `GET /snapshot`, `GET /metrics`, `GET`/`POST /membership`, `POST /membership/leave` (+ `POST /round/pause`, `/round/resume`, and the `POST /assess*` risk-assessment endpoints). All run the same image, and the mounted `config/hospital-*.yaml` decides which hospital it is and which engine it runs. Each node mounts only its own data slice. `hospital-d` (8004, the Swiss data) is the mid-demo joiner and only starts on request (profile `join`). `hospital-e` (8005) is a spare (profile `spare`). |
+| `hospital-a` ... `hospital-d` | 8001 ... 8004 | FastAPI node over HTTPS: `GET /health`, `GET /status`, `POST /round/start`, `POST /update`, `GET /snapshot`, `GET /metrics`, `GET`/`POST /membership`, `POST /membership/leave` (+ `POST /round/pause`, `/round/resume`, `/round/stop`, and the `POST /assess*` risk-assessment endpoints). All run the same image, and the mounted `config/hospital-*.yaml` decides which hospital it is and which engine it runs. Each node mounts only its own data slice. `hospital-d` (8004, the Swiss data) is the mid-demo joiner and only starts on request (profile `join`). `hospital-e` (8005) is a spare (profile `spare`). |
 | `observer` | 8200 | Takes the nodes' telemetry (`POST /ingest`, over HTTPS with its token; `observer/`) and writes it to Postgres with the same schema. Nodes push to it from a background queue, so training never waits for it. Nodes on other machines need only its URL and token, never Postgres credentials. |
 | `postgres` (container `medchain-postgres`) | 5432, loopback only | Holds `nodes`, `runs`, `rounds`, `updates_meta`, `metrics` and `audit_logs`. Only the observer writes it and only the dashboard reads it. |
 | `dashboard` | 8080 | Observer UI. It reads Postgres and pushes snapshots and update events over `/ws`. |
@@ -211,7 +211,7 @@ configured round limit (`training.rounds`, 400). Q-GADMM stops earlier, on the
 same round everywhere, once every edge's residual has stayed below epsilon for
 3 rounds (about round 70 for this three-hospital chain at b=2; a longer chain
 takes longer, which is expected). A request without the header gets `401`. The
-same header works for `POST /round/pause` and `POST /round/resume`.
+same header works for `POST /round/pause`, `POST /round/resume` and `POST /round/stop`.
 
 Once the run finishes, you can read any node's per-round history:
 
@@ -221,9 +221,22 @@ curl --cacert .pki/ca.crt https://localhost:8002/metrics
 
 ### 2. Open the dashboard
 
-Open <http://localhost:8080> in a browser.
+Open <http://localhost:8080> in a browser and log in. The dashboard has one admin
+account and shows nothing, not even the live snapshot, to anyone without its session
+(`dashboard/server/auth.js`). The account (user `admin`) is created on first run from
+`MEDCHAIN_ADMIN_PASSWORD` (at least 10 characters): set it before `make up`, or in
+`hub.env` for `make hub`. Without it nobody can log in, and the login screen says to
+set it and restart the dashboard.
 
-- Press **START TRAINING ROUND** in the top bar. The button changes to show
+The password is stored as a bcrypt hash. The session is an httpOnly, SameSite=Strict
+cookie (12 hours; **LOG OUT** in the top bar ends it), and Postgres keeps only its
+SHA-256. Five wrong passwords from one address lock it out for 5 minutes. **JOIN CODES**
+(admin) creates and revokes the one-time codes hospitals enroll with (see
+[Join with a code instead of a kit](#join-with-a-code-instead-of-a-kit)). **NODES**
+shows each hospital's signed proof of origin.
+
+- Press **START TRAINING ROUND** in the top bar. While a run is going, **STOP** ends it on every
+  hospital (the way out of a run a dead neighbour keeps from finishing). The button changes to show
   `TRAINING: ROUND n OF 400`, and a **PAUSE** button becomes active.
 - Use the top navigation (**TOPOLOGY**, **TRAINING MONITOR**,
   **COMMUNICATION**, **AUDIT LOG**) to watch the run live. With
@@ -411,8 +424,8 @@ epsilon on four or more.
 
 ### The directory
 
-`directory/` is a small FastAPI service with three calls: `POST /register`,
-`POST /leave` and `GET /membership`. Be clear about what it is: it **does
+`directory/` is a small FastAPI service with three membership calls: `POST /register`,
+`POST /leave` and `GET /membership` (plus `POST /enroll` for join codes, below). Be clear about what it is: it **does
 coordinate membership**. It decides where a new hospital goes in the chain and
 tells the existing hospitals who to connect to, so it is more than a phone
 book. It is a **single point of failure for joins and leaves, not for
@@ -615,7 +628,7 @@ is never re-keyed. Every hospital kit holds:
 - `README.md`, with the exact commands, including how to leave the chain.
 
 `--image repo[:tag]` names a different image (for example a private registry). By
-default the kits use the published `ghcr.io/denimworld12/medchain-node:v1.0.0`.
+default the kits use the published `ghcr.io/denimworld12/medchain-node:v1.1.0`.
 
 The directory kit is the hub's. It holds the directory's config, its TLS certificate,
 its document-signing key and `hospitals.yaml` (who may register: ids and credential
@@ -671,6 +684,92 @@ with `-` and other characters turned into `_`.
 (`--observer`, by default the directory's host on port 8200), which `deploy/hub.yml`
 runs next to Postgres. It never coordinates training. A node with no observer still
 trains and still serves `/status` and `/metrics`.
+
+### Join with a code instead of a kit
+
+A kit has to be made, zipped and sent, and it carries the network's shared secret.
+For a hospital on another laptop there is a second way in, next to the kits (which
+keep working unchanged): a **join code**.
+
+1. The organiser creates a code on the dashboard's admin page. It works **once** and
+   **expires** (30 minutes by default); the organiser can revoke it. The directory
+   keeps only its SHA-256.
+2. On the hospital's laptop, `python -m node.enroll` (run by the install script in
+   `deploy/install/`, inside the published image) makes the hospital's keys **on that
+   laptop**: a TLS key, an Ed25519 signing key and a directory credential. It sends the
+   hub only a certificate signing request, the public signing key and the credential's
+   hash, with the display name the person typed, to `POST /enroll` on the directory.
+   It proves it holds the code with an HMAC keyed by the code's hash, so the code itself
+   never crosses the network.
+3. The directory checks the code (known, unused, unrevoked, unexpired, the right
+   secret; five wrong tries revoke it), marks it used, and answers with: a certificate
+   for the hospital's key from the network CA, the CA certificate, the directory's
+   document key and certificate, the observer's certificate and port, an **observer
+   token for this hospital alone**, a generated node id, the engine settings, a data
+   slice, and the network secret. Its answer carries an HMAC under the same key, and
+   the node checks it, the nonce, and that the TLS key that answered is the
+   directory's, before trusting any of it.
+4. The node writes a kit folder with the same layout as a provisioned one, so
+   `deploy/node.yml` runs it.
+
+On the hospital's laptop this is one command: `deploy/install/install.ps1` (Windows)
+or `deploy/install/install.sh` (macOS, Linux), fetched from the release tag. It checks
+Docker, Tailscale, the hub and disk space (each with a plain-English fix), asks for
+the name and the code, reads the Tailscale address, enrolls inside the published
+image (no Python, no checkout) and starts the node. Running it again keeps the
+enrollment. The dashboard's **JOIN CODES** page shows the command with the hub's
+address filled in (`HUB_ADDRESS`). The secret goes to `pki/network/shared_secret`
+   (`SHARED_SECRET_FILE`): nobody types it, nothing prints it.
+
+**Names.** The person enrolling types the hospital's display name as free text; it
+is what the dashboard, the node's logs and the audit log show. No two hospitals may
+share one (compared ignoring case and spacing; the code stays valid for another try).
+The node id is separate and generated by the directory, a slug of the name plus random
+hex (`st-marys-leeds-3f9a`). TLS pins, signatures and chain placement stay keyed on the
+id and its keys, never on the name, and an enrolled hospital always appears under the
+name it enrolled with. `hospital-a` ... `hospital-e` stay as they are for `make up`
+and the kits.
+
+The organiser can take a hospital out on its behalf (`POST /admin/members/<id>/remove`,
+the **Remove** button on **NODES**): a laptop that is off cannot call `/leave` itself, and
+until it is out, the hospitals beyond it never start a run (once such a run ends, the
+control strip flags it as incomplete). An enrolled hospital is forgotten at the same time:
+its credential and observer token stop working and its name is free again, even if it
+was once in the chain. Unlike `/leave`, this works in a two-hospital chain: the hospital
+left alone waits there, unable to start a run, until another one joins.
+
+Every attempt is in the audit log (`enrolled`, `enroll_rejected`,
+`join_code_created`, `join_code_revoked`). An enrolled hospital may only register
+with the keys it enrolled with. Its observer token only writes rows as that hospital;
+the observer checks it against `hospital_keys`, which only the directory writes. The
+directory needs the CA key for this: `provision.py` puts it in the hub kit
+(`pki/ca.key`), and `deploy/hub.yml` mounts `data/slices/` and
+`config/hospital-a.yaml` (the engine settings) into it.
+
+### Proof of origin on the dashboard
+
+Every node with a signing key and an observer sends the observer a status message every
+10 seconds (`node/proof.py`, `POST /proof`), signed with the Ed25519 key that signs its
+training updates. It holds the computer's hostname, OS and version, uptime and Tailscale
+device name (read on the host by the install script; without it, what the container
+sees, labelled as such), the round-trip time it measures right then to each chain
+neighbour over the pinned TLS links training uses, and how many data rows it holds (the
+count only). It also carries a per-start boot id and a rising sequence number.
+
+The observer checks the signature against the key the directory has on record for that
+hospital (`hospital_keys`, written by the directory when the hospital registers or
+enrolls). It refuses a message that does not verify, comes from a hospital with no key
+on record or is a replay, and writes each refusal to the
+audit log (`proof_rejected`, at most once per hospital and reason every 5 minutes).
+Freshness is judged by arrival order (the boot id and sequence), not by the sender's
+clock, which on a laptop's Docker VM drifts after sleep; the page shows the clock skew
+when it exceeds a minute. A caller without that hospital's observer token (or the
+network's) is refused before any of this and only logged, so it cannot mark someone
+else's hospital rejected. The dashboard's **Nodes** page shows each hospital's facts
+with a **Signature verified** badge and the key's fingerprint, or **Rejected** with the
+reason. This is in addition to the Start/Pause controls. One limit: the host's uptime
+counts from the boot time the install script saw, so after a reboot, run the installer
+again to refresh it. The round-trip times and data rows are always live.
 
 ### Prove it
 
@@ -890,8 +989,8 @@ leaves, though not for training.
 - **Observer service and dashboard**: nodes push their telemetry to the observer
   (`observer/`, `POST /ingest`), which writes Postgres; the dashboard reads it.
   Neither coordinates training. The dashboard's buttons relay a
-  single start/pause request to one node in the chain, which floods it to the
-  others; it learns about each `/update` from the `updates_meta` rows the nodes
+  single start/pause/resume request to one node in the chain, which floods it to the
+  others (Stop goes to every alive node, so it gets past a dead one); it learns about each `/update` from the `updates_meta` rows the nodes
   report. Killing the dashboard does not affect a run (tested). It follows
   membership from what the nodes write: the topology page draws the current chain
   in order, the consensus panel shows only the current links and resets with each

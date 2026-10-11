@@ -54,6 +54,28 @@ DASHBOARD = os.environ.get("MEDCHAIN_DASHBOARD", f"http://{HOST}:{8080 + PORT_OF
 DB_URL = os.environ.get("MEDCHAIN_DB", f"postgresql://medchain:medchain@{HOST}:{5432 + PORT_OFFSET}/medchain")
 DASHBOARD_CONTAINER = PREFIX + os.environ.get("MEDCHAIN_DASHBOARD_CONTAINER", "dashboard")
 GOSSIP_ROUNDS = 20
+# the dashboard's admin account: docker-compose.yml creates it from MEDCHAIN_ADMIN_PASSWORD on first run
+ADMIN_PASSWORD = os.environ.get("MEDCHAIN_ADMIN_PASSWORD", "")
+_dashboard: httpx.Client | None = None
+
+
+def dash() -> httpx.Client:
+    """A client logged in to the dashboard (everything but the login screen needs the admin's session)."""
+    global _dashboard
+    if _dashboard is None:
+        assert ADMIN_PASSWORD, "set MEDCHAIN_ADMIN_PASSWORD (the stack's dashboard admin password)"
+        client = httpx.Client(base_url=DASHBOARD, timeout=15)
+        r = client.post("/api/auth/login", json={"username": "admin", "password": ADMIN_PASSWORD})
+        assert r.status_code == 200, r.text
+        _dashboard = client
+    return _dashboard
+
+
+def ws_connect():
+    from websockets.sync.client import connect
+
+    cookie = "; ".join(f"{k}={v}" for k, v in dash().cookies.items())
+    return connect(DASHBOARD.replace("http", "ws", 1) + "/ws", open_timeout=5, additional_headers={"Cookie": cookie})
 EPSILON = next(iter(NODES.values())).epsilon
 
 
@@ -94,7 +116,7 @@ def wait_until(pred, timeout: float, interval: float = 0.25, what: str = "condit
 
 
 def snapshot() -> dict:
-    return get(f"{DASHBOARD}/api/snapshot").json()
+    return dash().get("/api/snapshot").json()
 
 
 def metrics(node_id: str) -> dict:
@@ -126,7 +148,7 @@ def wait_idle(timeout: float = 150):
 
 def start_via_dashboard(rounds: int | None = None) -> str:
     """Press START. Without `rounds` every node runs its configured training.rounds (as the button does)."""
-    r = httpx.post(f"{DASHBOARD}/api/round/start", json={"rounds": rounds} if rounds else {}, timeout=15)
+    r = dash().post("/api/round/start", json={"rounds": rounds} if rounds else {})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "started" and body["engine"] == LABEL
@@ -203,11 +225,37 @@ def test_dashboard_renders():
             assert get(f"{DASHBOARD}{asset}").status_code == 200, asset
 
 
-def test_websocket_pushes_live_snapshots():
+def test_the_dashboard_needs_the_admins_login():
+    from websockets.exceptions import InvalidStatus
     from websockets.sync.client import connect
 
-    ws_url = DASHBOARD.replace("http", "ws", 1) + "/ws"
-    with connect(ws_url, open_timeout=5) as ws:
+    assert httpx.get(f"{DASHBOARD}/api/snapshot", timeout=5).status_code == 401
+    assert httpx.post(f"{DASHBOARD}/api/round/start", json={}, timeout=5).status_code == 401
+    assert httpx.post(f"{DASHBOARD}/api/assess", json={}, timeout=5).status_code == 401
+    assert httpx.get(f"{DASHBOARD}/api/admin/join-codes", timeout=5).status_code == 401
+    with pytest.raises(InvalidStatus):
+        connect(DASHBOARD.replace("http", "ws", 1) + "/ws", open_timeout=5)
+    me = httpx.get(f"{DASHBOARD}/api/auth/me", timeout=5).json()
+    assert me == {"authenticated": False, "username": None, "account_exists": True}
+    bad = httpx.post(f"{DASHBOARD}/api/auth/login", json={"username": "admin", "password": "wrong"}, timeout=10)
+    assert bad.status_code == 401 and "medchain_session" not in bad.cookies
+    cross = httpx.post(f"{DASHBOARD}/api/auth/login", json={"username": "admin", "password": ADMIN_PASSWORD},
+                       headers={"Origin": "http://evil.example"}, timeout=10)
+    assert cross.status_code == 403
+    # logged in: a join code from the admin page, then logout ends the session
+    client = httpx.Client(base_url=DASHBOARD, timeout=15)
+    assert client.post("/api/auth/login", json={"username": "admin", "password": ADMIN_PASSWORD}).status_code == 200
+    code = client.post("/api/admin/join-codes", json={"ttl_minutes": 5}).json()
+    assert len(code["code"]) == 24 and code["expires_at"]
+    listed = client.get("/api/admin/join-codes").json()["codes"]
+    assert next(c for c in listed if c["code_id"] == code["code_id"])["created_by"] == "admin"
+    assert client.post(f"/api/admin/join-codes/{code['code_id']}/revoke", json={}).json()["state"] == "revoked"
+    assert client.post("/api/auth/logout", json={}).status_code == 200
+    assert client.get("/api/snapshot").status_code == 401
+
+
+def test_websocket_pushes_live_snapshots():
+    with ws_connect() as ws:
         first = json.loads(ws.recv(timeout=5))
         second = next(m for m in (json.loads(ws.recv(timeout=5)) for _ in range(20)) if m["type"] == "snapshot")
     assert first["type"] == second["type"] == "snapshot"
@@ -238,21 +286,18 @@ def test_risk_assessment_on_every_node_and_via_the_dashboard():
         assert r.status_code == 200 and r.json()["node_id"] == node_id
         assert r.json()["risk_tier"] in ("LOW", "MODERATE", "HIGH")
     last = sorted(NODES)[-1]
-    via = httpx.post(f"{DASHBOARD}/api/assess", params={"node": last}, json=PATIENT, timeout=15)
+    via = dash().post("/api/assess", params={"node": last}, json=PATIENT)
     assert via.status_code == 200 and via.json()["node_id"] == last
     assert via.json()["model"]["metrics"]["roc_auc"] > 0.75  # the full model, trained at image build
-    pdf = httpx.post(f"{DASHBOARD}/api/assess/pdf", json=PATIENT, timeout=15)
+    pdf = dash().post("/api/assess/pdf", json=PATIENT)
     assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
-    ecg = httpx.post(f"{DASHBOARD}/api/assess/ecg", files={"ecg": ("ecg.png", ecg_png(), "image/png")}, timeout=15)
+    ecg = dash().post("/api/assess/ecg", files={"ecg": ("ecg.png", ecg_png(), "image/png")})
     assert ecg.status_code == 200 and set(ecg.json()["probabilities"]) == {"normal", "mi", "abnormal"}
 
 
 def test_training_run_completes_and_is_audited():
     wait_idle()
-    from websockets.sync.client import connect
-
-    ws_url = DASHBOARD.replace("http", "ws", 1) + "/ws"
-    with connect(ws_url, open_timeout=5) as ws:
+    with ws_connect() as ws:
         run_id = start_run()
         # one WebSocket "update" event per /update (drives the topology's envelope animation)
         events = []

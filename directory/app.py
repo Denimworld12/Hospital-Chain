@@ -11,6 +11,14 @@ What it does, and only this:
     POST /leave      planned departure: the hospital is taken out and its two neighbours
                      are told to bridge to each other.
     GET  /membership the current signed membership document.
+    POST /enroll     a new hospital joins the network with a one-time join code instead of a
+                     kit: it gets its certificate, pins and node id (directory/enroll.py).
+    /admin/join-codes  create, list and revoke join codes; for the dashboard's admin page, with
+                     the hub's admin token (`admin_token_file`, made on first start).
+    POST /admin/members/{id}/remove
+                     the organiser takes a hospital out on its behalf (a laptop that is off or
+                     gone): the same bridge as /leave, and an enrolled hospital is forgotten too,
+                     which frees its display name.
 
 So it does coordinate membership: it decides where a new hospital goes and tells
 the existing hospitals who to connect to. Placement: while no run is in progress,
@@ -25,6 +33,12 @@ a node's round loop calls it, so if it goes down the hospitals already in the ch
 keep training. Its storage (directory/store.py, SQLite) is separate from the
 Postgres the dashboard reads. Every document it issues is signed with its Ed25519
 key, so nodes can pass documents to each other and nobody can forge one.
+
+Who may register: the kit hospitals in `hospitals_file` (scripts/provision.py) and the
+hospitals that enrolled with a join code (its store). An enrolled hospital must register
+with the keys it enrolled with. With DATABASE_URL set, every enrollment attempt and join-code
+change also goes to the dashboard's audit log, and each hospital's keys on record go to
+Postgres (`hospital_keys`), where the observer checks per-hospital tokens and signatures.
 """
 
 from __future__ import annotations
@@ -32,8 +46,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
+import secrets
 from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -45,9 +61,12 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from node import pinning, security
+from node.db import Database, NullDatabase
 from node.discovery import push_membership
 from node.membership import Member, Membership
+from node.writer import DbWriter
 
+from .enroll import Enroller, EnrollmentConfig, EnrollmentError
 from .store import Store
 
 log = logging.getLogger("medchain.directory")
@@ -67,6 +86,8 @@ class DirectoryConfig:
     tls_cert: str | None = None
     tls_key: str | None = None
     ca: str | None = None  # verifies the nodes' certificates when it calls them
+    admin_token_file: str | None = None  # the dashboard's admin API token (created on first start)
+    enrollment: EnrollmentConfig | None = None  # join codes (directory/enroll.py); needs `tls:` and the CA key
 
 
 def load_config(path: str | os.PathLike | None = None) -> DirectoryConfig:
@@ -81,7 +102,9 @@ def load_config(path: str | os.PathLike | None = None) -> DirectoryConfig:
     return DirectoryConfig(port=int(raw["port"]), signing_key=str(raw["signing_key"]),
                            hospitals_file=str(raw["hospitals_file"]), db_path=str(raw["db_path"]),
                            host=str(raw.get("host", "0.0.0.0")), margin_rounds=int(raw.get("margin_rounds", 3)),
-                           tls_cert=tls.get("cert"), tls_key=tls.get("key"), ca=tls.get("ca"))
+                           tls_cert=tls.get("cert"), tls_key=tls.get("key"), ca=tls.get("ca"),
+                           admin_token_file=raw.get("admin_token_file"),
+                           enrollment=EnrollmentConfig.from_yaml(raw.get("enrollment")))
 
 
 def credential_hash(credential: str) -> str:
@@ -101,25 +124,105 @@ class LeaveRequest(BaseModel):
     node_id: str
 
 
-def create_app(cfg: DirectoryConfig | None = None) -> FastAPI:
+class NewCode(BaseModel):
+    created_by: str | None = None
+    ttl_minutes: int | None = None
+    data_slice: str | None = None
+
+
+class Revoke(BaseModel):
+    revoked_by: str | None = None
+
+
+class Remove(BaseModel):
+    removed_by: str | None = None
+
+
+OLD_HUB_KIT = ("re-run scripts/provision.py with the same --pki and `--hospital directory --force` (keys are kept), "
+               "set IMAGE_VERSION=v1.1.0 in its hub.env, then run make hub again")
+
+
+MAX_ENROLL_BYTES = 64 * 1024
+
+
+def admin_token(path: str) -> str:
+    """The hub's admin token: made on first start, read by the dashboard from the same file."""
+    p = Path(path)
+    if not p.is_file():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(secrets.token_urlsafe(32) + "\n")
+        p.chmod(0o600)
+    return p.read_text().strip()
+
+
+def create_app(cfg: DirectoryConfig | None = None, database: Database | None = None) -> FastAPI:
     cfg = cfg or load_config()
     key = security.load_signing_key(cfg.signing_key)
     store = Store(cfg.db_path)
     lock = asyncio.Lock()
     state: dict = {}
+    dsn = os.environ.get("DATABASE_URL")
+    db = DbWriter(database or (Database(dsn) if dsn else NullDatabase()))  # queued: never waited for
+    admin = admin_token(cfg.admin_token_file) if cfg.admin_token_file else None
 
-    def hospitals() -> list[dict]:
-        """Re-read on every request, so the operator can add a hospital's credential without a restart."""
+    def configured() -> list[dict]:
+        """The kit hospitals, re-read on every request, so the operator can add one without a restart."""
         return list(yaml.safe_load(Path(cfg.hospitals_file).read_text()) or [])
 
-    def authenticate(request: Request, node_id: str) -> int:
-        """The caller must hold `node_id`'s own credential. Returns that hospital's placement rank."""
+    def hospitals() -> list[dict]:
+        """Everyone who may register, in placement order: the kit hospitals, then the enrolled ones."""
+        return configured() + [{"id": r["node_id"], "credential_sha256": r["credential_sha256"], "enrolled": r}
+                               for r in store.enrolled()]
+
+    def member_names() -> dict[str, str]:
+        """{id: display name} of the hospitals that may still register, as the directory's documents (the current
+        and earlier chains) name them; a removed enrolled hospital's name is free again."""
+        ids = {str(h["id"]) for h in hospitals()}
+        return {m.id: m.display_name or m.id for doc in reversed(store.recent(1000)) for m in doc.members.values()
+                if m.id in ids}
+
+    # why this hub cannot take join codes (None: it can); a hub kit made before join codes has neither the
+    # `enrollment:` block nor the CA key
+    if not cfg.enrollment:
+        no_enrollment = f"this hub's directory kit was made before join codes: {OLD_HUB_KIT}"
+    elif not cfg.tls_cert:
+        no_enrollment = "this directory serves no TLS (`tls:` in its config), and join codes need it"
+    elif not Path(cfg.enrollment.ca_key).is_file():
+        no_enrollment = f"this hub kit has no CA key at {cfg.enrollment.ca_key}: {OLD_HUB_KIT}"
+    else:
+        no_enrollment = None
+    if no_enrollment:
+        log.warning("join codes unavailable: %s", no_enrollment)
+    enroller = (None if no_enrollment else
+                Enroller(cfg.enrollment, store, signing_key=key, directory_cert=cfg.tls_cert,
+                         configured_ids=lambda: [str(h["id"]) for h in configured()], member_names=member_names))
+
+    def audit(event: str, node_id: str | None, detail: dict, sender: str | None = None) -> None:
+        """The directory's own log, and the dashboard's audit log."""
+        store.log(event, node_id, detail)
+        db.audit(node_id="directory", event=event, sender=sender or node_id, detail=detail)
+
+    def require_admin(request: Request) -> None:
+        auth = request.headers.get("Authorization", "")
+        given = auth[7:] if auth.startswith("Bearer ") else ""
+        if admin is None:
+            raise HTTPException(503, detail="this directory has no admin API (set admin_token_file)")
+        if not given or not hmac.compare_digest(given.encode(), admin.encode()):
+            raise HTTPException(401, detail="the hub's admin token is required")
+
+    def require_enrollment() -> Enroller:
+        if enroller is None:
+            raise HTTPException(503, detail=f"This hub cannot take join codes: {no_enrollment}.")
+        return enroller
+
+    def authenticate(request: Request, node_id: str) -> tuple[int, dict | None]:
+        """The caller must hold `node_id`'s own credential. Returns its placement rank (and its enrollment)."""
         auth = request.headers.get("Authorization", "")
         given = auth[7:] if auth.startswith("Bearer ") else ""
         for rank, h in enumerate(hospitals()):
             if str(h["id"]) == node_id:
                 if given and hmac.compare_digest(credential_hash(given), str(h["credential_sha256"])):
-                    return rank
+                    return rank, h.get("enrolled")
                 store.log("auth_failed", node_id, {"reason": "bad credential"})
                 raise HTTPException(401, detail=f"bad credential for {node_id}")
         store.log("auth_failed", node_id, {"reason": "unknown hospital"})
@@ -198,12 +301,15 @@ def create_app(cfg: DirectoryConfig | None = None) -> FastAPI:
         timeout = httpx.Timeout(3.0, connect=1.5)
         state["client"] = (pinning.pinned_client(cfg.ca, cfg.tls_cert, cfg.tls_key, expected_pins, timeout) if cfg.ca
                            else httpx.AsyncClient(timeout=timeout))
-        log.info("directory up on :%d (%s), %d hospitals known", cfg.port, "https" if cfg.tls_cert else "http",
-                 len(hospitals()))
+        db.start()
+        db.ensure_schema()
+        log.info("directory up on :%d (%s), %d hospitals known%s", cfg.port, "https" if cfg.tls_cert else "http",
+                 len(hospitals()), ", taking join codes" if enroller else "")
         try:
             yield
         finally:
             await state["client"].aclose()
+            db.stop()
 
     app = FastAPI(title="MedChain directory", lifespan=lifespan)
     app.state.store = store
@@ -225,7 +331,7 @@ def create_app(cfg: DirectoryConfig | None = None) -> FastAPI:
 
     @app.post("/register")
     async def register(req: RegisterRequest, request: Request):
-        rank = authenticate(request, req.node_id)
+        rank, enrolled = authenticate(request, req.node_id)
         if req.public_key:
             try:
                 security.parse_public_key(req.public_key)
@@ -238,7 +344,19 @@ def create_app(cfg: DirectoryConfig | None = None) -> FastAPI:
         require_own_key(request, req)
         if not req.url.startswith(("http://", "https://")):
             raise HTTPException(400, detail="url must be http(s)://")
-        me = Member(req.node_id, req.url.rstrip("/"), req.public_key, req.display_name, req.tls_spki_sha256)
+        if enrolled and (req.public_key, req.tls_spki_sha256) != (enrolled["signing_public_key"], enrolled["tls_pin"]):
+            store.log("auth_failed", req.node_id, {"reason": "keys differ from the ones it enrolled with"})
+            raise HTTPException(403, detail=f"{req.node_id} must register with the keys it enrolled with; to change "
+                                            "them, enroll again with a new join code")
+        # an enrolled hospital goes by the name it enrolled with, whatever its node says
+        name = enrolled["display_name"] if enrolled else req.display_name
+        me = Member(req.node_id, req.url.rstrip("/"), req.public_key, name, req.tls_spki_sha256)
+        # an enrolled hospital's own observer token is re-synced on every registration, so a lost write or a
+        # reset Postgres never locks its telemetry out
+        db.hospital_key(node_id=req.node_id, display_name=name or req.node_id,
+                        signing_public_key=req.public_key, tls_pin=req.tls_spki_sha256,
+                        observer_token_sha256=enrolled["observer_token_sha256"] if enrolled else None,
+                        enrolled=bool(enrolled))
         async with lock:
             latest = store.latest()
             chain = list(latest.chain) if latest else []
@@ -265,28 +383,122 @@ def create_app(cfg: DirectoryConfig | None = None) -> FastAPI:
             store.log("joined", req.node_id, {"epoch": doc.epoch, "rank": rank, "where": where, "effective_round": at})
             return {"membership": doc.to_dict(), "joined": True, "told": told}
 
+    async def take_out(node_id: str, verb: str, minimum: int = MIN_CHAIN) -> tuple[Membership, dict, list[str], int | None]:
+        """Schedule the chain without `node_id`; its two neighbours bridge to each other. Call holding `lock`."""
+        latest = store.latest()
+        if latest is None or node_id not in latest.chain:
+            raise HTTPException(409, detail=f"{node_id} is not in the chain")
+        chain = [m for m in latest.chain if m != node_id]
+        if len(chain) < minimum:
+            raise HTTPException(409, detail=f"a chain needs at least {MIN_CHAIN} hospitals")
+        i = latest.chain.index(node_id)
+        bridge = [latest.chain[j] for j in (i - 1, i + 1) if 0 <= j < len(latest.chain)]
+        run_id, at = await schedule(latest.chain)
+        members = {m: v for m, v in latest.members.items() if m != node_id}
+        how = (f"{' and '.join(bridge)} bridge to each other" if len(bridge) == 2 else
+               f"{bridge[0]} is left alone until another hospital joins" if len(chain) == 1 else
+               f"{bridge[0]} becomes the chain end" if bridge else "the chain is empty")
+        doc, told = await issue(chain, members, f"{node_id} {verb}: {how}", run_id, at)
+        return doc, told, bridge, at
+
     @app.post("/leave")
     async def leave(req: LeaveRequest, request: Request):
         authenticate(request, req.node_id)
         async with lock:
-            latest = store.latest()
-            if latest is None or req.node_id not in latest.chain:
-                raise HTTPException(409, detail=f"{req.node_id} is not in the chain")
-            chain = [m for m in latest.chain if m != req.node_id]
-            if len(chain) < MIN_CHAIN:
-                raise HTTPException(409, detail=f"a chain needs at least {MIN_CHAIN} hospitals")
-            i = latest.chain.index(req.node_id)
-            bridge = [latest.chain[j] for j in (i - 1, i + 1) if 0 <= j < len(latest.chain)]
-            run_id, at = await schedule(latest.chain)
-            members = {m: v for m, v in latest.members.items() if m != req.node_id}
-            how = f"{' and '.join(bridge)} bridge to each other" if len(bridge) == 2 else f"{bridge[0]} becomes the chain end"
-            doc, told = await issue(chain, members, f"{req.node_id} left: {how}", run_id, at)
+            doc, told, bridge, at = await take_out(req.node_id, "left")
             store.log("left", req.node_id, {"epoch": doc.epoch, "bridge": bridge, "effective_round": at})
             return {"membership": doc.to_dict(), "told": told}
+
+    @app.post("/admin/members/{node_id}/remove")
+    async def remove_member(node_id: str, req: Remove, request: Request):
+        """The organiser takes a hospital out on its behalf: one that is off or gone cannot call /leave itself.
+        An enrolled hospital is also forgotten (its credential stops working and its name is free again); a kit
+        hospital stays in hospitals.yaml, so it rejoins if its node starts again. Unlike /leave, this may leave
+        a hospital alone in the chain: it waits there, unable to start a run, until another one joins."""
+        require_admin(request)
+        async with lock:
+            forgotten = store.remove_enrolled(node_id)
+            if forgotten:
+                db.hospital_forgotten(node_id=node_id)
+            latest = store.latest()
+            in_chain = latest is not None and node_id in latest.chain
+            doc = told = None
+            if in_chain:
+                doc, told, bridge, at = await take_out(node_id, f"was removed by {req.removed_by or 'the organiser'}",
+                                                       minimum=0)
+            if not in_chain and not forgotten:
+                raise HTTPException(404, detail=f"{node_id} is neither in the chain nor an enrolled hospital")
+            audit("member_removed", node_id, {"by": req.removed_by, "from_chain": in_chain, "forgotten": forgotten,
+                                              **({"epoch": doc.epoch, "bridge": bridge, "effective_round": at}
+                                                 if doc else {})}, sender=req.removed_by)
+            return {"node_id": node_id, "removed_from_chain": in_chain, "forgotten": forgotten,
+                    "epoch": doc.epoch if doc else None, "told": told}
 
     @app.get("/events")
     async def events(request: Request, limit: int = 100):
         require_any_hospital(request)
         return {"events": store.events(limit)}
+
+    # -- join codes -----------------------------------------------------------------------------
+    @app.post("/enroll")
+    async def enroll(request: Request):
+        """A new hospital, with a join code (directory/enroll.py). No credential: the code is the credential."""
+        e = require_enrollment()
+        raw = await request.body()
+        req: dict = {}
+        try:
+            if len(raw) > MAX_ENROLL_BYTES:
+                raise EnrollmentError(413, "enrollment request too large")
+            try:
+                req = json.loads(raw)
+            except ValueError:
+                req = None
+            if not isinstance(req, dict):
+                req = {}
+                raise EnrollmentError(400, "the enrollment request is not a JSON object")
+            answer, record = e.enroll(req)
+        except EnrollmentError as exc:
+            audit("enroll_rejected", None, {"code_id": str(req.get("code_id", ""))[:8],
+                                            "display_name": " ".join(str(req.get("display_name", "")).split())[:80],
+                                            "reason": exc.detail, "client": request.client.host if request.client else None})
+            raise HTTPException(exc.status, detail=exc.detail)
+        audit("enrolled", record["node_id"], {"code_id": record["code_id"], "display_name": record["display_name"],
+                                              "data_slice": record["data_slice"], "tls_pin": record["tls_pin"],
+                                              "client": request.client.host if request.client else None})
+        db.hospital_key(node_id=record["node_id"], display_name=record["display_name"],
+                        signing_public_key=record["signing_public_key"], tls_pin=record["tls_pin"],
+                        observer_token_sha256=record["observer_token_sha256"], enrolled=True)
+        log.info("enrolled %s as %s (code %s)", record["display_name"], record["node_id"], record["code_id"])
+        return answer
+
+    @app.post("/admin/join-codes")
+    async def create_code(req: NewCode, request: Request):
+        require_admin(request)
+        e = require_enrollment()
+        try:
+            out = e.create_code(req.created_by, req.ttl_minutes, req.data_slice)
+        except EnrollmentError as exc:
+            raise HTTPException(exc.status, detail=exc.detail)
+        audit("join_code_created", None, {"code_id": out["code_id"], "expires_at": out["expires_at"],
+                                          "data_slice": out["data_slice"], "by": req.created_by}, sender=req.created_by)
+        return out
+
+    @app.get("/admin/join-codes")
+    async def list_codes(request: Request):
+        require_admin(request)
+        e = require_enrollment()
+        return {"codes": [{**c, "state": e.state(c)} for c in store.codes()], "slices": e.slices(),
+                "ttl_minutes": e.cfg.code_ttl_minutes,
+                "hospitals": [{k: r[k] for k in ("node_id", "display_name", "data_slice", "code_id", "enrolled_at")}
+                              for r in store.enrolled()]}
+
+    @app.post("/admin/join-codes/{code_id}/revoke")
+    async def revoke_code(code_id: str, req: Revoke, request: Request):
+        require_admin(request)
+        require_enrollment()
+        if not store.revoke_code(code_id, req.revoked_by):
+            raise HTTPException(409, detail=f"join code {code_id} is not active (unknown, used or already revoked)")
+        audit("join_code_revoked", None, {"code_id": code_id, "by": req.revoked_by}, sender=req.revoked_by)
+        return {"code_id": code_id, "state": "revoked"}
 
     return app

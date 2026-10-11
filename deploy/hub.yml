@@ -1,7 +1,8 @@
 # The MedChain hub: what the organiser's laptop runs (docs/MULTI_LAPTOP.md). The hospitals
 # run deploy/node.yml on their own laptops.
 #
-#   directory   membership only: where a hospital sits in the chain, who bridges a leave
+#   directory   membership only: where a hospital sits in the chain, who bridges a leave;
+#               and join codes, for hospitals that enroll instead of getting a kit
 #   observer    takes the nodes' pushed telemetry into Postgres (training never waits for it)
 #   postgres    the dashboard's database, on this machine's loopback only
 #   dashboard   http://localhost:8080
@@ -16,7 +17,7 @@
 name: medchain-hub
 
 x-medchain: &medchain
-  image: ${MEDCHAIN_IMAGE:-ghcr.io/denimworld12/medchain-node}:${IMAGE_VERSION:-v1.0.0}
+  image: ${MEDCHAIN_IMAGE:-ghcr.io/denimworld12/medchain-node}:${IMAGE_VERSION:-v1.1.0}
   restart: unless-stopped
 
 services:
@@ -27,7 +28,7 @@ services:
       POSTGRES_PASSWORD: medchain
       POSTGRES_DB: medchain
     ports:
-      - "127.0.0.1:5432:5432"  # loopback only: hospitals never connect to Postgres, the observer does
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"  # loopback only: hospitals never connect to Postgres, the observer does
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -42,10 +43,21 @@ services:
     command: ["python", "-m", "directory"]
     environment:
       DIRECTORY_CONFIG: /config/directory.yaml
+      # the audit log and the hospitals' keys on record (the observer checks per-hospital tokens against them)
+      DATABASE_URL: postgresql://medchain:medchain@postgres:5432/medchain
+      # handed to hospitals that enroll with a join code, so nobody types it
+      MEDCHAIN_SHARED_SECRET: ${MEDCHAIN_SHARED_SECRET:?set MEDCHAIN_SHARED_SECRET (the kits' shared secret) in hub.env}
     volumes:
       - ${HUB_KIT:?set HUB_KIT (the directory kit folder) in hub.env}/config/directory.yaml:/config/directory.yaml:ro
       - ${HUB_KIT}/pki:/pki:ro
       - directory-data:/data
+      - hub-secrets:/hub  # the admin token the dashboard's admin page uses (made on first start)
+      # join codes hand out a data slice and the engine settings every hospital shares
+      - ./data/slices:/slices:ro
+      - ./config/hospital-a.yaml:/templates/node.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       # must be the port in the directory's address (its kit's config/directory.yaml)
       - "${HUB_BIND_IP:-0.0.0.0}:${DIRECTORY_PORT:-8100}:${DIRECTORY_PORT:-8100}"
@@ -90,8 +102,19 @@ services:
       MEDCHAIN_SHARED_SECRET: ${MEDCHAIN_SHARED_SECRET:?set MEDCHAIN_SHARED_SECRET (the kits' shared secret) in hub.env}
       # the relay reaches the hospitals over HTTPS at their registered addresses: trust the network CA
       NODE_EXTRA_CA_CERTS: /pki/ca.crt
+      # the one admin account (dashboard/server/auth.js), user admin: unset, nobody can log in
+      DASHBOARD_ADMIN_PASSWORD: ${MEDCHAIN_ADMIN_PASSWORD:-}
+      # the admin page's join codes, with the admin token the directory writes to hub-secrets
+      DIRECTORY_ADMIN_URL: https://directory:${DIRECTORY_PORT:-8100}
+      DIRECTORY_ADMIN_TOKEN_FILE: /hub/admin_token
+      # the install commands the Join codes page shows: where hospitals reach this hub
+      HUB_ADDRESS: ${HUB_ADDRESS:-}
+      HUB_DIRECTORY_PORT: ${DIRECTORY_PORT:-8100}
+      # the release tag the install commands fetch the install scripts from (a test tag before a release)
+      INSTALLER_VERSION: ${INSTALLER_VERSION:-v1.1.0}
     volumes:
       - ${HUB_KIT}/pki/ca.crt:/pki/ca.crt:ro
+      - hub-secrets:/hub:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -102,3 +125,4 @@ services:
 volumes:
   postgres-data:
   directory-data:
+  hub-secrets:

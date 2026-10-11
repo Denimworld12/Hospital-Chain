@@ -27,6 +27,7 @@ configured from an `.env` file alone, or from its kit's YAML plus a few override
     TLS_CERT, TLS_KEY, TLS_CA    this node's certificate and key, and the network CA
     SIGNING_KEY                  this node's Ed25519 update-signing key
     SHARED_SECRET                the network's X-MedChain-Secret
+    SHARED_SECRET_FILE           ... read from this file instead (a join-code enrollment writes it, node/enroll.py)
     IMAGE_VERSION                the image's version, reported by /health
     MEDCHAIN_PEER_<ID>_URL       a static neighbour's address (node/config.py)
 
@@ -81,6 +82,7 @@ class NodeSettings(BaseSettings):
     tls_ca: str | None = _env("TLS_CA")
     signing_key: str | None = _env("SIGNING_KEY")
     shared_secret: str | None = _env("SHARED_SECRET")
+    shared_secret_file: str | None = _env("SHARED_SECRET_FILE")
     image_version: str | None = _env("IMAGE_VERSION")
 
 
@@ -97,7 +99,8 @@ def apply_env(raw: dict, s: NodeSettings, source: str) -> dict:
     top = {"node_id": s.node_id, "host": s.bind_host, "port": s.node_port, "advertise_url": s.advertise_addr,
            "data_path": s.data_path, "data_slice": s.data_slice, "checkpoint_dir": s.checkpoint_dir,
            "engine": s.algorithm, "bits": s.bits, "epsilon": s.epsilon, "signing_key": s.signing_key,
-           "shared_secret": s.shared_secret, "image_version": s.image_version}
+           "shared_secret": Path(s.shared_secret_file).read_text().strip() if s.shared_secret_file else s.shared_secret,
+           "image_version": s.image_version}
     raw.update({k: v for k, v in top.items() if v is not None})
     _block(raw, "timing", {"round_timeout_s": s.round_timeout_s, "round_pause_s": s.round_pause_s})
     _block(raw, "http", {"connect_timeout_s": s.http_connect_timeout_s, "read_timeout_s": s.http_read_timeout_s})

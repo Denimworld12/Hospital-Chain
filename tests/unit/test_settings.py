@@ -9,7 +9,7 @@ from node.config import NodeConfig, load_config
 ROOT = Path(__file__).resolve().parents[2]
 SETTINGS = ["NODE_CONFIG", "NODE_ID", "BIND_HOST", "NODE_PORT", "ADVERTISE_ADDR", "MEDCHAIN_ADVERTISE_URL",
             "DIRECTORY_URL", "MEDCHAIN_DIRECTORY_URL", "OBSERVER_URL", "OBSERVER_TOKEN", "OBSERVER_TLS_PIN", "DATA_PATH",
-            "ALGORITHM", "BITS", "EPSILON", "ROUND_TIMEOUT_S", "IMAGE_VERSION", "SHARED_SECRET", "TLS_CERT", "TLS_KEY",
+            "ALGORITHM", "BITS", "EPSILON", "ROUND_TIMEOUT_S", "IMAGE_VERSION", "SHARED_SECRET", "SHARED_SECRET_FILE", "TLS_CERT", "TLS_KEY",
             "TLS_CA", "SIGNING_KEY", "DIRECTORY_CREDENTIAL_FILE", "DIRECTORY_PUBLIC_KEY", "DIRECTORY_TLS_PIN",
             "HTTP_CONNECT_TIMEOUT_S", "HTTP_READ_TIMEOUT_S", "ROUND_PAUSE_S", "CHECKPOINT_DIR", "DATA_SLICE"]
 
@@ -95,3 +95,10 @@ def test_missing_yaml_named_by_node_config_is_an_error(monkeypatch, tmp_path):
     monkeypatch.setenv("NODE_CONFIG", str(tmp_path / "nope.yaml"))
     with pytest.raises(FileNotFoundError):
         load_config()
+
+
+def test_the_shared_secret_can_come_from_a_file(monkeypatch, tmp_path):
+    """A join-code enrollment writes it to pki/network/shared_secret, so nobody types it (node/enroll.py)."""
+    (tmp_path / "secret").write_text("from-the-hub\n")
+    monkeypatch.setenv("SHARED_SECRET_FILE", str(tmp_path / "secret"))
+    assert load_config(ROOT / "config" / "hospital-b.yaml").shared_secret == "from-the-hub"

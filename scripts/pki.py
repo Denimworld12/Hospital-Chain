@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
-import ipaddress
 import secrets
 import sys
 from pathlib import Path
@@ -38,14 +37,14 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from cryptography.x509.oid import NameOID
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from node.security import public_key_b64  # noqa: E402
+from node.security import BACKDATE, CERT_VALID_DAYS, issue_certificate, public_key_b64  # noqa: E402
 
-VALID_DAYS = 3650
+VALID_DAYS = CERT_VALID_DAYS
 
 
 def _pem_key(key) -> bytes:
@@ -69,7 +68,7 @@ def ensure_ca(out: Path) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "MedChain network CA")])
     now = dt.datetime.now(dt.timezone.utc)
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(k.public_key())
-            .serial_number(x509.random_serial_number()).not_valid_before(now - dt.timedelta(minutes=5))
+            .serial_number(x509.random_serial_number()).not_valid_before(now - BACKDATE)
             .not_valid_after(now + dt.timedelta(days=VALID_DAYS))
             .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
             .add_extension(x509.KeyUsage(False, False, False, False, False, True, True, False, False), critical=True)
@@ -77,13 +76,6 @@ def ensure_ca(out: Path) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
     _write(key, _pem_key(k), private=True)
     _write(crt, cert.public_bytes(serialization.Encoding.PEM))
     return cert, k
-
-
-def _san(host: str) -> x509.GeneralName:
-    try:
-        return x509.IPAddress(ipaddress.ip_address(host))
-    except ValueError:
-        return x509.DNSName(host)
 
 
 def _covers(crt: Path, names: list[str]) -> bool:
@@ -102,16 +94,7 @@ def ensure_identity(out: Path, name: str, hosts: list[str], *, credential: bool)
         # a new address keeps the party's TLS key: peers pin the key (node/pinning.py), not the address
         k = (serialization.load_pem_private_key((d / "tls.key").read_bytes(), password=None)
              if (d / "tls.key").is_file() else ec.generate_private_key(ec.SECP256R1()))
-        now = dt.datetime.now(dt.timezone.utc)
-        cert = (x509.CertificateBuilder()
-                .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))
-                .issuer_name(ca_cert.subject).public_key(k.public_key()).serial_number(x509.random_serial_number())
-                .not_valid_before(now - dt.timedelta(minutes=5)).not_valid_after(now + dt.timedelta(days=VALID_DAYS))
-                .add_extension(x509.SubjectAlternativeName([_san(h) for h in names]), critical=False)
-                .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-                .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]),
-                               critical=False)
-                .sign(ca_key, hashes.SHA256()))
+        cert = issue_certificate(ca_cert, ca_key, k.public_key(), name, names, VALID_DAYS)
         _write(d / "tls.key", _pem_key(k), private=True)
         _write(d / "tls.crt", cert.public_bytes(serialization.Encoding.PEM))
     if not (d / "signing.key").is_file():

@@ -7,14 +7,18 @@ import TrainingMonitor from "./pages/TrainingMonitor.jsx";
 import Communication from "./pages/Communication.jsx";
 import AuditLog from "./pages/AuditLog.jsx";
 import Assessment from "./pages/Assessment.jsx";
+import Nodes from "./pages/Nodes.jsx";
+import JoinCodes from "./pages/JoinCodes.jsx";
 import { control, useSnapshot } from "./useSnapshot.js";
 
 const ROUTES = [
   { hash: "#/", label: "Topology" },
   { hash: "#/training", label: "Training monitor" },
   { hash: "#/communication", label: "Communication" },
+  { hash: "#/nodes", label: "Nodes" },
   { hash: "#/audit", label: "Audit log" },
   { hash: "#/assessment", label: "Risk assessment" },
+  { hash: "#/join-codes", label: "Join codes" },
 ];
 
 function useHashRoute() {
@@ -57,6 +61,11 @@ function ControlStrip({ snapshot }) {
           <EngineChip label={snapshot?.engine || "naive gossip baseline"} />
           <span className="control-strip__run" data-testid="run-state">
             {run ? `${run.run_id} / ${state}` : "No training run yet"}
+            {run?.missing?.length > 0 && (
+              <span className="bad" data-testid="run-missing">
+                {" "}- incomplete: {run.missing.map((n) => n.display_name).join(", ")} never took part
+              </span>
+            )}
           </span>
         </div>
         <div className="control-strip__actions">
@@ -72,6 +81,13 @@ function ControlStrip({ snapshot }) {
               Pause
             </PillButton>
           )}
+          {running && (
+            // ends the run on every alive hospital (sent to each, not passed along): the way out of a run that cannot finish (a neighbour is gone)
+            <PillButton variant="secondary" onClick={() => window.confirm("Stop this training run on every hospital?")
+              && act("stop")} disabled={busy}>
+              Stop
+            </PillButton>
+          )}
         </div>
       </div>
       {message && <p className="page control-strip__message" role="status">{message}</p>}
@@ -79,7 +95,7 @@ function ControlStrip({ snapshot }) {
   );
 }
 
-export default function App() {
+export default function App({ username, onLogout }) {
   const route = useHashRoute();
   const { snapshot, connection } = useSnapshot();
 
@@ -97,6 +113,9 @@ export default function App() {
                 {r.label}
               </a>
             ))}
+            <button type="button" className="nav__item logout" onClick={onLogout} title={`Logged in as ${username}`}>
+              Log out
+            </button>
           </nav>
           <span className={`live live--${connection}`}>{connection === "live" ? "Live" : connection}</span>
         </div>
@@ -112,8 +131,10 @@ export default function App() {
         )}
         {route === "#/training" && <TrainingMonitor snapshot={snapshot} />}
         {route === "#/communication" && <Communication snapshot={snapshot} />}
+        {route === "#/nodes" && <Nodes snapshot={snapshot} />}
         {route === "#/audit" && <AuditLog snapshot={snapshot} />}
         {route === "#/assessment" && <Assessment snapshot={snapshot} />}
+        {route === "#/join-codes" && <JoinCodes />}
       </main>
       <footer className="footer">
         <div className="page">

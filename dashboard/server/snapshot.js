@@ -8,6 +8,8 @@
 // pure functions below, which are unit-tested (snapshot.test.js).
 
 export const STALE_AFTER_S = Number(process.env.HEARTBEAT_STALE_S || 7);
+// node/proof.py sends a signed proof-of-origin message every 10 s; older than this, it no longer counts as live
+export const PROOF_STALE_S = Number(process.env.PROOF_STALE_S || 35);
 const AUDIT_ROWS = Number(process.env.AUDIT_ROWS || 80);
 
 const edgeKey = (a, b) => `${a}|${b}`;
@@ -19,6 +21,7 @@ function runState(run, nodes) {
   if (states.has("running")) return "running";
   if (states.has("paused")) return "paused";
   if (states.has("failed")) return "failed";
+  if (states.has("stopped")) return "stopped";
   if (states.has("completed")) return "completed";
   return inRun.length ? [...states][0] : "stalled";
 }
@@ -153,10 +156,61 @@ export function commFrom(perRoundRows, topology, hospitals = new Map()) {
   };
 }
 
+// Proof of origin per hospital (node/proof.py, checked by the observer): "verified" while its newest signed
+// message is fresh and newer than any refused one, "rejected" when the newest thing it sent was refused,
+// "stale" once it goes quiet, "none" if the observer never accepted one from it.
+export function proofsFrom(rows, staleAfter = PROOF_STALE_S) {
+  return rows.map((r) => {
+    const since = r.seconds_since_proof;
+    const rejectedSince = r.seconds_since_rejection;
+    let status = "none";
+    if (rejectedSince != null && (since == null || rejectedSince < since)) status = "rejected";
+    else if (since != null) status = since <= staleAfter ? "verified" : "stale";
+    return {
+      node_id: r.node_id,
+      display_name: r.display_name || r.node_id,
+      enrolled: !!r.enrolled,
+      status,
+      seconds_since_proof: since,
+      key_fingerprint: r.key_fingerprint || null,
+      rejection: status === "rejected" ? r.rejection : null,
+      message: r.message || null,
+    };
+  });
+}
+
+async function proofRows(pool) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.node_id, p.message, p.key_fingerprint, p.rejection, k.display_name, k.enrolled,
+              EXTRACT(EPOCH FROM (now() - p.received_at))::float AS seconds_since_proof,
+              EXTRACT(EPOCH FROM (now() - p.rejected_at))::float AS seconds_since_rejection
+         FROM node_proofs p LEFT JOIN hospital_keys k USING (node_id) ORDER BY p.node_id`,
+    );
+    return rows;
+  } catch {
+    return []; // an observer older than node_proofs has not created the table
+  }
+}
+
+// The chain's hospitals that were registered before a run started but never took part in it (no round logged,
+// never on its run id): a laptop that was off, or one cut off behind it. A run that "completed" without them
+// did not train on their data, and the control strip says so. Only once the run is over: while it starts, the
+// others are still hearing of it.
+export function missingFromRun(run, state, nodes, topology, metrics) {
+  if (!run || !["completed", "failed", "stopped"].includes(state)) return [];
+  const started = new Date(run.started_at).getTime();
+  return nodes
+    .filter((n) => (topology?.chain || []).includes(n.node_id))
+    .filter((n) => !n.registered_at || new Date(n.registered_at).getTime() <= started)
+    .filter((n) => n.run_id !== run.run_id && !(metrics[n.node_id] || []).length)
+    .map((n) => ({ node_id: n.node_id, display_name: n.display_name }));
+}
+
 export async function buildSnapshot(pool) {
   const nodesRes = await pool.query(
     `SELECT node_id, display_name, url, patients, neighbours, engine, run_id, run_state, current_round,
-            epoch, chain, in_chain, membership_round,
+            epoch, chain, in_chain, membership_round, registered_at,
             EXTRACT(EPOCH FROM (now() - last_heartbeat))::float AS seconds_since_heartbeat
        FROM nodes ORDER BY node_id`,
   );
@@ -218,18 +272,20 @@ export async function buildSnapshot(pool) {
   );
 
   const engine = run?.engine || nodes.find((n) => n.engine)?.engine || "naive gossip baseline";
+  const state = runState(run, nodes);
   return {
     generated_at: new Date().toISOString(),
     engine,
     heartbeat_stale_after_s: STALE_AFTER_S,
     nodes,
     topology,
-    run: run ? { ...run, state: runState(run, nodes) } : null,
+    run: run ? { ...run, state, missing: missingFromRun(run, state, nodes, topology, metrics) } : null,
     metrics,
     network_loss: networkLoss,
     consensus,
     comm,
     audit: auditRes.rows,
+    proofs: proofsFrom(await proofRows(pool)),
   };
 }
 

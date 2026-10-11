@@ -129,12 +129,17 @@ def test_one_run_provisions_every_hospital_and_the_hub(tmp_path, monkeypatch):
     assert not any((d / "pki" / n).exists() for n in ids), "the directory gets no hospital's private keys"
     dcfg = yaml.safe_load((d / "config/directory.yaml").read_text())
     assert dcfg["port"] == 8100 and dcfg["hospitals_file"] == "/pki/directory/hospitals.yaml"
+    # the hub signs join-code hospitals' certificates: its kit, and only its kit, holds the CA key
+    assert dcfg["enrollment"]["ca_key"] == "/pki/ca.key" and dcfg["enrollment"]["observer_port"] == 8200
+    assert (d / "pki/ca.key").read_bytes() == (tmp_path / ".pki/ca.key").read_bytes()
+    assert not any((tmp_path / n / "pki/ca.key").exists() for n in ids)
     assert {"100.101.1.99", "localhost"} <= sans(d / "pki/directory/tls.crt")
     # its hub.env runs deploy/hub.yml: laid out like the example, listening on the hub's Tailscale IP
     hub = provision.read_env((d / "hub.env").read_text())
     assert set(hub) - {"MEDCHAIN_IMAGE"} == set(provision.read_env((ROOT / "deploy/hub.env.example").read_text()))
     assert hub["HUB_KIT"] == str(d.resolve()) and hub["MEDCHAIN_SHARED_SECRET"] == cfgs["hospital-a"].shared_secret
     assert (hub["DIRECTORY_PORT"], hub["OBSERVER_PORT"], hub["HUB_BIND_IP"]) == ("8100", "8200", "100.101.1.99")
+    assert hub["HUB_ADDRESS"] == "100.101.1.99", "the dashboard's install commands point hospitals here"
     assert "#HUB_BIND_IP=0.0.0.0" in (d / "hub.env").read_text()
     assert not list(d.glob("*.yaml")) and not (d / "source").exists(), "the hub runs deploy/hub.yml from the repo"
     # every kit trusts the same CA and the same directory key
