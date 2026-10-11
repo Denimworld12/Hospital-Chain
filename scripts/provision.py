@@ -25,7 +25,14 @@ observer's keys, and a filled `hub.env` for `make hub` (deploy/hub.yml) from the
 
 `--peers` lists every hospital with the address its neighbours reach it at (a LAN IP, a
 Tailscale MagicDNS name, a domain); the order is the directory's placement order while
-no run is in progress. Every link is HTTPS: each address goes into that hospital's
+no run is in progress. One hospital is enough (the organiser's own) when the others will
+enroll with join codes from the dashboard.
+
+Only Docker installed (no Python)? Run it inside the published node image, from the
+repository (or its source zip) folder; the kits land in ./kits as usual:
+
+    docker run --rm -v "${PWD}:/src" -w /src ghcr.io/denimworld12/medchain-node:v1.1.0 \
+        python scripts/provision.py --zip --peers ... --directory ... Every link is HTTPS: each address goes into that hospital's
 certificate, issued by the network CA kept in `--pki` (default kits/.pki). Nodes push
 their telemetry to the observer (`--observer`, default the directory's host on port
 8200) with its token and pin its key; no kit holds database credentials. Re-running
@@ -91,8 +98,8 @@ def parse_peers(spec: str) -> dict[str, str]:
         if node_id in peers or node_id in (DIRECTORY, OBSERVER):
             raise ValueError(f"--peers lists {node_id} twice" if node_id in peers else f"{node_id!r} is reserved")
         peers[node_id] = parse_url(node_id, addr)
-    if len(peers) < 2:
-        raise ValueError("--peers needs at least two hospitals (a chain)")
+    if not peers:
+        raise ValueError("--peers needs at least one hospital (your own; join codes add the others later)")
     return peers
 
 

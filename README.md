@@ -604,7 +604,19 @@ python scripts/provision.py --zip \
 `--peers` lists every hospital with the address the others reach it at: a LAN
 IP, a Tailscale name or a domain. Every address is HTTPS (a bare `host:port`
 gets `https://`; `http://` is rejected). The order is the directory's placement
-order between runs. The command writes `kits/hospital-a/` ... `kits/hospital-d/`
+order between runs. One hospital (your own) is enough when everyone else will
+join with a code from the dashboard.
+
+**Only Docker installed (no Python)?** Run `provision.py` inside the published node
+image, from the repository folder (a clone or the release's source zip). The same
+command works in PowerShell and in a Mac or Linux terminal:
+
+```sh
+docker run --rm -v "${PWD}:/src" -w /src ghcr.io/denimworld12/medchain-node:v1.1.0 \
+  python scripts/provision.py --zip --peers hospital-a=sam-laptop.tail1234.ts.net:8001 --directory sam-laptop.tail1234.ts.net:8100
+```
+
+On Linux, add `--user "$(id -u):$(id -g)"` after `--rm` so the kits belong to you, not root. The command writes `kits/hospital-a/` ... `kits/hospital-d/`
 and `kits/directory/`, plus a `.zip` of each. The network's CA and keys live in
 `kits/.pki/` (or `--pki DIR`) and are reused on every later run, so the network
 is never re-keyed. Every hospital kit holds:
@@ -639,6 +651,13 @@ then each hospital, each with one command:
 ```sh
 make hub                                                          # on the hub, from the repository
 docker compose --project-directory . -f deploy/node.yml up -d     # on each hospital machine, in its kit
+```
+
+No `make` (a stock Windows laptop has none)? `make hub` is exactly this, run from the
+repository folder:
+
+```sh
+docker compose --project-directory . --env-file kits/directory/hub.env -f deploy/hub.yml up -d --wait
 ```
 
 Start training from any one node (`POST /round/start`, as above). The start
@@ -769,7 +788,10 @@ else's hospital rejected. The dashboard's **Nodes** page shows each hospital's f
 with a **Signature verified** badge and the key's fingerprint, or **Rejected** with the
 reason. This is in addition to the Start/Pause controls. One limit: the host's uptime
 counts from the boot time the install script saw, so after a reboot, run the installer
-again to refresh it. The round-trip times and data rows are always live.
+again to refresh it. Another: a hospital started from a kit (such as the organiser's own)
+had no install script to read the laptop's facts, so it shows what its container sees,
+the container's hostname and the Docker VM's Linux. The round-trip times and data rows
+are always live.
 
 ### Prove it
 
