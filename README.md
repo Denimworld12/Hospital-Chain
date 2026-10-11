@@ -570,6 +570,115 @@ the hub machine's Tailscale IP.
 is the guide for someone who has never used Docker: installing Docker Desktop and
 Tailscale, the kit, the preflight, the hotspot fallback and a troubleshooting table.
 
+### Windows step by step: Docker and Tailscale only
+
+These are the exact steps tested with the published `v1.1.0` on a clean Windows 11
+laptop, in Windows PowerShell 5.1 (Start menu > type "PowerShell"). That laptop had no
+Python, git or `make`. You need Docker Desktop running ("Engine running") and Tailscale
+signed in on both laptops (see [`docs/MULTI_LAPTOP.md`](docs/MULTI_LAPTOP.md) step 1).
+
+**On the organiser's laptop** (the hub, plus one hospital of your own):
+
+1. **Invite the friend to your tailnet first.** In the Tailscale admin console go to Users > Invite
+   users. The friend must accept before installing: without Tailscale the installer stops at
+   "Tailscale is not installed", and on another tailnet it says your hub "does not answer".
+2. **Get the code.** Download <https://github.com/Denimworld12/Hospital-Chain/archive/refs/tags/v1.1.0.zip>.
+   Right-click it, choose Extract All, then open PowerShell in the extracted folder:
+
+   ```powershell
+   cd "$HOME\Downloads\Hospital-Chain-1.1.0\Hospital-Chain-1.1.0"   # wherever Extract All put it
+   ```
+
+3. **Make the kits inside Docker** (no Python needed). `provision.py` is not in the image,
+   so mount the folder into it. It wants at least two hospitals. List yours and a second
+   one: it only matters if you ever start it, so friends can still join by code.
+
+   ```powershell
+   $ip = tailscale ip -4
+   docker run --rm -v "${PWD}:/src" -w /src ghcr.io/denimworld12/medchain-node:v1.1.0 python scripts/provision.py --zip --peers "hospital-a=${ip}:8001,hospital-b=${ip}:8002" --directory "${ip}:8100"
+   ```
+
+   The first run downloads the MedChain image (about 2 GB, about 5 minutes). It writes
+   `kits\directory\` (your hub kit, with a filled `hub.env`) and `kits\hospital-a\`.
+   The `kits` folder holds private keys: don't share or commit it.
+4. **Set the admin password:** `notepad kits\directory\hub.env`. Then:
+   - Fill in `MEDCHAIN_ADMIN_PASSWORD=` (at least 10 characters).
+   - If this laptop already runs PostgreSQL, also add a line `POSTGRES_PORT=55433`.
+   - Save the file.
+5. **Start the hub.** `make hub` needs `make`, which Windows doesn't have, so use the
+   command it runs:
+
+   ```powershell
+   docker compose --project-directory . --env-file kits/directory/hub.env -f deploy/hub.yml up -d --wait
+   ```
+
+   It builds the dashboard the first time, and is healthy in about a minute and a half.
+6. **Start your own hospital:**
+
+   ```powershell
+   docker compose --project-directory kits/hospital-a -f kits/hospital-a/deploy/node.yml up -d
+   ```
+
+7. **Make a join code.**
+   - Open <http://localhost:8080> and log in as `admin` with that password.
+   - Click **JOIN CODES**, then **CREATE A JOIN CODE**.
+   - Send the friend the code and the **Windows (PowerShell)** command shown under it,
+     which already has your hub address. Select the text and copy it (there is no Copy
+     button). The code works once and for 30 minutes.
+
+**On the friend's laptop:**
+
+1. Open PowerShell and paste the command from the organiser. It looks like this:
+
+   ```powershell
+   $env:MEDCHAIN_HUB = "100.x.y.z:8100"; irm https://raw.githubusercontent.com/Denimworld12/Hospital-Chain/v1.1.0/deploy/install/install.ps1 | iex
+   ```
+
+2. Type the hospital's name, then paste the join code (it is hidden as you type).
+3. **Wait.** About 5 minutes the first time (the 2 GB download), then a few seconds. It
+   checks Docker, Tailscale, the hub and disk space, enrolls, starts the hospital and ends with
+   `Done. This laptop is running hospital <id>`.
+4. **If Windows asks** whether Docker Desktop Backend may use the network, tick
+   **Private networks** and click Allow.
+
+That is about 2 to 4 clicks, 2 pastes and one typed name.
+
+**Back on the organiser's laptop:**
+
+- **Check the friend arrived.** **NODES** lists the friend's hospital as **SIGNATURE
+  VERIFIED**, with their computer's name, Windows version and Tailscale name.
+- **Train.** Press **START TRAINING ROUND**. With two hospitals it converged at round 43 to
+  45, about 15 seconds later.
+- **Stop.** **STOP** ends a run on every hospital, even when one went dark mid-run.
+- **Remove.** **REMOVE** on NODES takes a dead laptop out of the chain.
+
+**Known issue with `v1.1.0` on Windows** ([#11](https://github.com/Denimworld12/Hospital-Chain/issues/11)):
+
+Pasting the install command a **second time** on an already-enrolled laptop fails with
+"Docker could not start the hospital". The port advice it prints is wrong. Until a fixed
+installer is tagged:
+
+- **After a reboot:** do nothing. Docker Desktop restarts the hospital by itself
+  (`restart: unless-stopped`).
+- **To restart it by hand** (for example after its Tailscale address changed):
+
+  ```powershell
+  docker compose --project-directory "$HOME\MedChain" -f "$HOME\MedChain\deploy\node.yml" up -d --force-recreate
+  ```
+
+- **If the organiser removed the laptop:** delete the `MedChain` folder in your home
+  folder, ask for a new join code and paste the command again. The same name works.
+
+**Shutting down afterwards:**
+
+```powershell
+# friend
+docker compose --project-directory "$HOME\MedChain" -f "$HOME\MedChain\deploy\node.yml" down
+# organiser, in the extracted folder
+docker compose --project-directory kits/hospital-a -f kits/hospital-a/deploy/node.yml down
+docker compose --project-directory . --env-file kits/directory/hub.env -f deploy/hub.yml down
+```
+
 ### The deployment: one file per laptop
 
 - `deploy/node.yml` runs one hospital node: a single `node` service from the
