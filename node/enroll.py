@@ -19,7 +19,9 @@ The organiser creates a join code on the dashboard's admin page: single use, exp
    `data/`, `config/node.yaml`, `deploy/node.yml`), so `docker compose --project-directory
    <out> -f deploy/node.yml up -d` runs it like any other hospital.
 
-The hub answers with: a certificate for this node's TLS key, signed by the network CA; the
+The display name is free text and is what the dashboard, the logs and the audit trail
+show; the hub refuses one another hospital already has. The hub answers with: a
+certificate for this node's TLS key, signed by the network CA; the
 CA certificate; the directory's document key and TLS certificate (pinned from then on); the
 observer's TLS certificate and port and an ingest token for this hospital alone; the
 network secret (written to `pki/network/shared_secret`, never printed); the engine settings
@@ -328,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not code:
             raise EnrollError("no join code: pass --code or set MEDCHAIN_JOIN_CODE")
+        if not 2 <= len(name) <= 60:
+            raise EnrollError("the hospital's name must be 2 to 60 characters")
         advertise = check_address(args.advertise)
         hub_host, hub_port = split_hub(args.hub)
         keys = Keys.generate()

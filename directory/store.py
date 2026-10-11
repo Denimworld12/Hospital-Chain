@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS join_codes (
 CREATE TABLE IF NOT EXISTS enrolled (
     node_id               TEXT PRIMARY KEY,
     display_name          TEXT NOT NULL,
+    name_key              TEXT NOT NULL UNIQUE,  -- two hospitals never share a display name (directory/enroll.py)
     credential_sha256     TEXT NOT NULL,
     signing_public_key    TEXT NOT NULL,
     tls_pin               TEXT NOT NULL,
@@ -57,7 +58,7 @@ CREATE TABLE IF NOT EXISTS enrolled (
 
 CODE_COLUMNS = ("code_id", "created_at", "created_by", "expires_at", "data_slice", "used_at", "used_by", "revoked_at",
                 "revoked_by", "failures")
-ENROLLED_COLUMNS = ("node_id", "display_name", "credential_sha256", "signing_public_key", "tls_pin",
+ENROLLED_COLUMNS = ("node_id", "display_name", "name_key", "credential_sha256", "signing_public_key", "tls_pin",
                     "observer_token_sha256", "data_slice", "code_id", "enrolled_at")
 MAX_FAILURES = 5  # wrong proofs for one code before it is revoked
 

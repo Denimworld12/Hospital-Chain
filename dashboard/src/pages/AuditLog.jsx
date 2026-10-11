@@ -5,8 +5,15 @@ function time(ts) {
   return Number.isNaN(d.getTime()) ? ts : d.toISOString().replace("T", " ").slice(0, 23) + "Z";
 }
 
+// Hospitals by their display name (the node id, their stable identity, is in the tooltip).
+function Party({ id, names }) {
+  if (!id) return "-";
+  return names[id] && names[id] !== id ? <span title={id}>{names[id]}</span> : id;
+}
+
 export default function AuditLog({ snapshot }) {
   const rows = snapshot?.audit || [];
+  const names = Object.fromEntries((snapshot?.nodes || []).map((n) => [n.node_id, n.display_name]));
   return (
     <section className="section">
       <div className="page">
@@ -30,8 +37,8 @@ export default function AuditLog({ snapshot }) {
                   <td>{time(r.ts)}</td>
                   <td>{r.event.replaceAll("_", " ")}</td>
                   <td>{r.round ?? "-"}</td>
-                  <td>{r.sender || "-"}</td>
-                  <td>{r.receiver || "-"}</td>
+                  <td><Party id={r.sender} names={names} /></td>
+                  <td><Party id={r.receiver} names={names} /></td>
                   <td className="num">{r.payload_bytes != null ? formatBytes(r.payload_bytes) : "-"}</td>
                   <td className="checksum" title={r.checksum || ""}>
                     {r.checksum ? `${r.checksum.slice(0, 16)}...` : "-"}

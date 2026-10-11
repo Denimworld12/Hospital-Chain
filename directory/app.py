@@ -162,8 +162,12 @@ def create_app(cfg: DirectoryConfig | None = None, database: Database | None = N
         return configured() + [{"id": r["node_id"], "credential_sha256": r["credential_sha256"], "enrolled": r}
                                for r in store.enrolled()]
 
+    def member_names() -> dict[str, str]:
+        """{id: display name} of every hospital in the directory's documents (the current and earlier chains)."""
+        return {m.id: m.display_name or m.id for doc in reversed(store.recent(1000)) for m in doc.members.values()}
+
     enroller = (Enroller(cfg.enrollment, store, signing_key=key, directory_cert=cfg.tls_cert,
-                         configured_ids=lambda: [str(h["id"]) for h in configured()])
+                         configured_ids=lambda: [str(h["id"]) for h in configured()], member_names=member_names)
                 if cfg.enrollment and cfg.tls_cert else None)
 
     def audit(event: str, node_id: str | None, detail: dict, sender: str | None = None) -> None:
@@ -318,8 +322,10 @@ def create_app(cfg: DirectoryConfig | None = None, database: Database | None = N
             store.log("auth_failed", req.node_id, {"reason": "keys differ from the ones it enrolled with"})
             raise HTTPException(403, detail=f"{req.node_id} must register with the keys it enrolled with; to change "
                                             "them, enroll again with a new join code")
-        me = Member(req.node_id, req.url.rstrip("/"), req.public_key, req.display_name, req.tls_spki_sha256)
-        db.hospital_key(node_id=req.node_id, display_name=req.display_name or req.node_id,
+        # an enrolled hospital goes by the name it enrolled with, whatever its node says
+        name = enrolled["display_name"] if enrolled else req.display_name
+        me = Member(req.node_id, req.url.rstrip("/"), req.public_key, name, req.tls_spki_sha256)
+        db.hospital_key(node_id=req.node_id, display_name=name or req.node_id,
                         signing_public_key=req.public_key, tls_pin=req.tls_spki_sha256)
         async with lock:
             latest = store.latest()

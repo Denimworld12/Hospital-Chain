@@ -126,6 +126,7 @@ def test_a_hospital_enrolls_with_a_join_code_and_joins_the_chain(hub, tmp_path, 
     record = hub.directory.store.enrolled()[0]
     assert (record["node_id"], record["display_name"], record["data_slice"]) == (node_id, "St Mary's Leeds",
                                                                                   "hospital-d.csv")
+    assert node_id.startswith("st-mary-s-leeds-") and len(node_id) == len("st-mary-s-leeds-") + 4
     # its own keys: the hub has only the public halves and hashes
     assert record["tls_pin"] == cert_file_pin(kit / "pki" / node_id / "tls.crt")
     assert record["signing_public_key"] == (kit / "pki" / node_id / "signing.pub").read_text().strip()
@@ -228,3 +229,35 @@ def test_the_hub_must_prove_it_issued_the_code(hub, monkeypatch):
     monkeypatch.setattr(enroll, "post_enroll", tampered)
     with pytest.raises(enroll.EnrollError, match="not from the hub"):
         enroll.request_enrollment(hub.hub, "Hospital", hub.code(), ["127.0.0.1"], enroll.Keys.generate())
+
+
+def test_display_names_are_free_text_but_never_shared_and_ids_stay_stable(hub, tmp_path, monkeypatch):
+    from directory.enroll import name_key, slug
+
+    assert slug("  Hôpital Saint-Éloi (Paris) ") == "hopital-saint-eloi-p"
+    assert slug("医院") == "hospital" and name_key("St  MARY'S") == name_key("st mary's")
+    hub.nodes.append(NodeServer(hub.cfgs["hospital-a"]).start())  # no display_name in its config: "hospital-a"
+    wait_until(lambda: hub.nodes[0].status()["in_chain"], 20, "hospital-a registered")
+
+    code = hub.code()
+    with pytest.raises(enroll.EnrollError, match=r"\(hospital-a\) is already called 'HOSPITAL-A'"):
+        enroll.request_enrollment(hub.hub, "HOSPITAL-A", code, ["127.0.0.1"], enroll.Keys.generate())
+    first = enroll.request_enrollment(hub.hub, "Leeds General", code, ["127.0.0.1"], enroll.Keys.generate())
+    with pytest.raises(enroll.EnrollError, match="already called"):
+        enroll.request_enrollment(hub.hub, "LEEDS general", hub.code(), ["127.0.0.1"], enroll.Keys.generate())
+    second = enroll.request_enrollment(hub.hub, "Leeds General 2", hub.code(), ["127.0.0.1"], enroll.Keys.generate())
+    assert first["node_id"] != second["node_id"] and first["node_id"].startswith("leeds-general-")
+
+    # the name it enrolled with is the one the chain shows, whatever its node's config says
+    kit = tmp_path / "kit"
+    (port,) = free_ports(1)
+    assert enroll.main(["--hub", hub.hub, "--name", "Royal Infirmary", "--code", hub.code(), "--advertise",
+                        "127.0.0.1", "--port", str(port), "--out", str(kit)]) == 0
+    node_id = kit_env(monkeypatch, kit)
+    config = kit / "config" / "node.yaml"
+    config.write_text(config.read_text().replace("display_name: Royal Infirmary", "display_name: hospital-a"))
+    node = NodeServer(config).start()
+    hub.nodes.append(node)
+    wait_until(lambda: node_id in hub.nodes[0].status()["chain"], 20, "the enrolled node in the chain")
+    assert hub.directory.store.latest().members[node_id].display_name == "Royal Infirmary"
+    wait_until(lambda: hub.db.keys.get(node_id, {}).get("display_name") == "Royal Infirmary", 5, "its key record")

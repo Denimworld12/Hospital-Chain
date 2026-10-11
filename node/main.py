@@ -232,8 +232,8 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
             state["rejoin"] = asyncio.create_task(register_with_directory(runner))
         elif cfg.is_admm:  # a checkpoint on the volume means we were killed mid-run: rejoin it
             state["rejoin"] = asyncio.create_task(runner.rejoin())
-        log.info("%s up on :%d (%s) with %d patients, neighbours=%s, engine=%s", cfg.node_id, cfg.port, cfg.scheme,
-                 trainer.n_patients, nbs, engine.label)
+        log.info("%s (%s) up on :%d (%s) with %d patients, neighbours=%s, engine=%s", cfg.display_name, cfg.node_id,
+                 cfg.port, cfg.scheme, trainer.n_patients, nbs, engine.label)
         try:
             yield
         finally:
