@@ -23,6 +23,8 @@ COPY observer /app/observer
 COPY scripts/pki.py /app/scripts/pki.py
 # run inside a node's container: docker compose ... exec node python scripts/preflight.py
 COPY scripts/preflight.py /app/scripts/preflight.py
+# python -m node.enroll writes a kit around it (join-code enrollment, deploy/install/)
+COPY deploy/node.yml /app/deploy/node.yml
 COPY models/ecg-resnet18.onnx /app/models/ecg-resnet18.onnx
 COPY --from=risk-model /app/models/heart-risk.joblib /app/models/heart-risk.joblib
 # the release this image was built as (.github/workflows/image.yml), reported by /health

@@ -1,7 +1,9 @@
 """MedChain observer: the one place telemetry lands. Nodes push to it; it never calls them.
 
     POST /ingest   a batch of a node's writes, {"node_id", "items": [{"kind", "payload"}, ...]}, with
-                   `Authorization: Bearer <OBSERVER_TOKEN>`. Each item is one Database write
+                   `Authorization: Bearer <token>`: the network's OBSERVER_TOKEN (kit hospitals), or
+                   the token a hospital got when it enrolled with a join code, which only ever
+                   writes as that hospital (directory/enroll.py). Each item is one Database write
                    (node/db.py: heartbeat, audit, record_metrics, ...), applied with the same
                    methods, so the Postgres schema and the dashboard are unchanged.
     GET  /health   liveness
@@ -19,8 +21,10 @@ OBSERVER_TOKEN or OBSERVER_TOKEN_FILE, and TLS_CERT / TLS_KEY / TLS_CA for HTTPS
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -29,11 +33,11 @@ from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from node.db import Database, NullDatabase
-from node.writer import WRITE_METHODS
+from node.writer import HUB_ONLY, WRITE_METHODS
 
 log = logging.getLogger("medchain.observer")
 
-KINDS = WRITE_METHODS - {"ensure_schema"}  # the observer owns the schema; a node never runs DDL through it
+KINDS = WRITE_METHODS - HUB_ONLY  # the observer owns the schema and the directory the keys: never a node
 
 
 def _env(*names: str, default=None):
@@ -71,6 +75,14 @@ class Batch(BaseModel):
     items: list[Item] = Field(max_length=1000)
 
 
+OWNER_CACHE_S = 30.0
+
+
+def own_writes(items: list[Item], node_id: str) -> bool:
+    """A hospital's own token writes only as that hospital: no item may name another node (as node_id or sender)."""
+    return all(item.payload.get(k, node_id) == node_id for item in items for k in ("node_id", "sender"))
+
+
 def create_app(settings: ObserverSettings | None = None, database: Database | None = None) -> FastAPI:
     settings = settings or ObserverSettings()
     token = settings.token.encode()
@@ -86,11 +98,29 @@ def create_app(settings: ObserverSettings | None = None, database: Database | No
 
     app = FastAPI(title="MedChain observer", lifespan=lifespan)
 
-    def authorize(request: Request) -> None:
+    owners: dict[str, tuple[float, str | None]] = {}  # token hash -> (when looked up, its hospital)
+
+    def token_owner(digest: str) -> str | None:
+        """The enrolled hospital this token hash belongs to (hospital_keys, written by the directory)."""
+        hit = owners.get(digest)
+        if hit and time.monotonic() - hit[0] < OWNER_CACHE_S:
+            return hit[1]
+        rows = db.fetch("SELECT node_id FROM hospital_keys WHERE observer_token_sha256 = %s", (digest,))
+        if len(owners) > 1024:  # bounded: unknown tokens are remembered too
+            owners.clear()
+        owners[digest] = (time.monotonic(), rows[0][0] if rows else None)
+        return owners[digest][1]
+
+    async def authorize(request: Request, batch: Batch) -> None:
         auth = request.headers.get("Authorization", "")
         given = auth[7:].encode() if auth.startswith("Bearer ") else b""
-        if not given or not hmac.compare_digest(given, token):
+        if given and hmac.compare_digest(given, token):
+            return  # the network token (kit hospitals, the single-machine stack)
+        owner = await asyncio.to_thread(token_owner, hashlib.sha256(given).hexdigest()) if given else None
+        if owner is None:
             raise HTTPException(401, detail="a valid observer token is required")
+        if owner != batch.node_id or not own_writes(batch.items, owner):
+            raise HTTPException(403, detail=f"this token belongs to {owner}: it writes only as {owner}")
 
     def apply(batch: Batch) -> tuple[int, list[str]]:
         applied, rejected = 0, []
@@ -111,7 +141,7 @@ def create_app(settings: ObserverSettings | None = None, database: Database | No
 
     @app.post("/ingest")
     async def ingest(batch: Batch, request: Request):
-        authorize(request)
+        await authorize(request, batch)
         async with write_lock:  # one batch at a time, in arrival order
             applied, rejected = await asyncio.to_thread(apply, batch)
         if rejected:

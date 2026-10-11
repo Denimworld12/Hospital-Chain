@@ -143,6 +143,17 @@ DIRECTORY_URL_ENV = "MEDCHAIN_DIRECTORY_URL"
 DEFAULT_PORT = 8000
 
 
+# where a node runs, who it is and its keys: everything a config holds that is not the shared engine settings
+DEPLOYMENT_KEYS = ("node_id", "port", "host", "advertise_url", "chain", "neighbours", "directory", "observer", "tls",
+                   "signing_key", "shared_secret", "data_slice", "data_path", "checkpoint_dir")
+
+
+def engine_settings(raw: dict) -> dict:
+    """A node config without its deployment keys: what every hospital of one network must share (the engine,
+    rho, bits, timing...). A kit's config/node.yaml, from scripts/provision.py or a join-code enrollment."""
+    return {k: v for k, v in raw.items() if k not in DEPLOYMENT_KEYS}
+
+
 def peer_url_env(node_id: str) -> str:
     """The environment variable that overrides neighbour `node_id`'s URL."""
     return f"MEDCHAIN_PEER_{re.sub(r'[^A-Za-z0-9]+', '_', node_id).upper()}_URL"

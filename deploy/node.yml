@@ -20,7 +20,7 @@ name: medchain-${NODE_ID:?set NODE_ID in .env, and run from your kit folder with
 
 services:
   node:
-    image: ${MEDCHAIN_IMAGE:-ghcr.io/denimworld12/medchain-node}:${IMAGE_VERSION:-v1.0.0}
+    image: ${MEDCHAIN_IMAGE:-ghcr.io/denimworld12/medchain-node}:${IMAGE_VERSION:-v1.1.0}
     env_file: .env
     # where the kit's files are inside the container (these win over `.env`)
     environment:

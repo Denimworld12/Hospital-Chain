@@ -14,3 +14,17 @@ tls:
   cert: /pki/directory/tls.crt
   key: /pki/directory/tls.key
   ca: /pki/ca.crt
+# the hub's admin token, for the dashboard's admin page (join codes): made on first start; the
+# dashboard reads the same file
+admin_token_file: /hub/admin_token
+# Join codes (directory/enroll.py): a hospital on another laptop enrolls with a one-time code
+# from the dashboard instead of a kit. Its own keys stay on its laptop; the directory issues
+# its certificate with the network CA, so it needs the CA key.
+enrollment:
+  ca_cert: /pki/ca.crt
+  ca_key: /pki/ca.key
+  observer_cert: /pki/observer/tls.crt  # enrolled hospitals pin the observer's key
+  observer_port: 8200
+  slices_dir: /slices                   # the data slices a code hands out
+  node_template: /templates/node.yaml   # its engine settings are every hospital's
+  code_ttl_minutes: 30

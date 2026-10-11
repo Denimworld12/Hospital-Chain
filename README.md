@@ -411,8 +411,8 @@ epsilon on four or more.
 
 ### The directory
 
-`directory/` is a small FastAPI service with three calls: `POST /register`,
-`POST /leave` and `GET /membership`. Be clear about what it is: it **does
+`directory/` is a small FastAPI service with three membership calls: `POST /register`,
+`POST /leave` and `GET /membership` (plus `POST /enroll` for join codes, below). Be clear about what it is: it **does
 coordinate membership**. It decides where a new hospital goes in the chain and
 tells the existing hospitals who to connect to, so it is more than a phone
 book. It is a **single point of failure for joins and leaves, not for
@@ -615,7 +615,7 @@ is never re-keyed. Every hospital kit holds:
 - `README.md`, with the exact commands, including how to leave the chain.
 
 `--image repo[:tag]` names a different image (for example a private registry). By
-default the kits use the published `ghcr.io/denimworld12/medchain-node:v1.0.0`.
+default the kits use the published `ghcr.io/denimworld12/medchain-node:v1.1.0`.
 
 The directory kit is the hub's. It holds the directory's config, its TLS certificate,
 its document-signing key and `hospitals.yaml` (who may register: ids and credential
@@ -671,6 +671,42 @@ with `-` and other characters turned into `_`.
 (`--observer`, by default the directory's host on port 8200), which `deploy/hub.yml`
 runs next to Postgres. It never coordinates training. A node with no observer still
 trains and still serves `/status` and `/metrics`.
+
+### Join with a code instead of a kit
+
+A kit has to be made, zipped and sent, and it carries the network's shared secret.
+For a hospital on another laptop there is a second way in, next to the kits (which
+keep working unchanged): a **join code**.
+
+1. The organiser creates a code on the dashboard's admin page. It works **once** and
+   **expires** (30 minutes by default); the organiser can revoke it. The directory
+   keeps only its SHA-256.
+2. On the hospital's laptop, `python -m node.enroll` (run by the install script in
+   `deploy/install/`, inside the published image) makes the hospital's keys **on that
+   laptop**: a TLS key, an Ed25519 signing key and a directory credential. It sends the
+   hub only a certificate signing request, the public signing key and the credential's
+   hash, with the display name the person typed, to `POST /enroll` on the directory.
+   It proves it holds the code with an HMAC keyed by the code's hash, so the code itself
+   never crosses the network.
+3. The directory checks the code (known, unused, unrevoked, unexpired, the right
+   secret; five wrong tries revoke it), marks it used, and answers with: a certificate
+   for the hospital's key from the network CA, the CA certificate, the directory's
+   document key and certificate, the observer's certificate and port, an **observer
+   token for this hospital alone**, a generated node id, the engine settings, a data
+   slice, and the network secret. Its answer carries an HMAC under the same key, and
+   the node checks it, the nonce, and that the TLS key that answered is the
+   directory's, before trusting any of it.
+4. The node writes a kit folder with the same layout as a provisioned one, so
+   `deploy/node.yml` runs it. The secret goes to `pki/network/shared_secret`
+   (`SHARED_SECRET_FILE`): nobody types it, nothing prints it.
+
+Every attempt is in the audit log (`enrolled`, `enroll_rejected`,
+`join_code_created`, `join_code_revoked`). An enrolled hospital may only register
+with the keys it enrolled with. Its observer token only writes rows as that hospital;
+the observer checks it against `hospital_keys`, which only the directory writes. The
+directory needs the CA key for this: `provision.py` puts it in the hub kit
+(`pki/ca.key`), and `deploy/hub.yml` mounts `data/slices/` and
+`config/hospital-a.yaml` (the engine settings) into it.
 
 ### Prove it
 

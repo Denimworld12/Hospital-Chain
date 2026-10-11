@@ -7,8 +7,11 @@ metrics.chain_size (the membership epoch and chain length of that round), and
 nodes.epoch / chain / in_chain / membership_round (each node's current view of the
 chain, so the dashboard can draw it; the directory's own store is separate).
 
-Nodes are the only writers. The dashboard reads these tables and never writes
-them. Writes are best-effort: a database outage is logged and training carries
+Nodes are the only writers of the training tables. `hospital_keys` is the directory's:
+each hospital's keys as the directory has them on record (its update-signing key, TLS pin,
+and, for a hospital that enrolled with a join code, the hash of its own observer token), so
+the observer can tell hospitals apart without trusting what they say about themselves.
+The dashboard reads these tables and never writes them. Writes are best-effort: a database outage is logged and training carries
 on, because the database is an observation channel, not a coordinator.
 """
 
@@ -104,6 +107,16 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS epoch INTEGER;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS chain JSONB;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS in_chain BOOLEAN;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS membership_round INTEGER;
+-- written by the directory only (never through the observer's /ingest): keys on record per hospital
+CREATE TABLE IF NOT EXISTS hospital_keys (
+    node_id               TEXT PRIMARY KEY,
+    display_name          TEXT NOT NULL,
+    signing_public_key    TEXT,
+    tls_pin               TEXT,
+    observer_token_sha256 TEXT UNIQUE,
+    enrolled              BOOLEAN NOT NULL DEFAULT false,
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 SCHEMA_LOCK_KEY = 4242_0001
@@ -125,6 +138,13 @@ class Database:
         return conn
 
     def _execute(self, sql: str, params: tuple | dict | None = None) -> None:
+        self._run(sql, params, fetch=False)
+
+    def fetch(self, sql: str, params: tuple | dict | None = None) -> list[tuple]:
+        """Rows of a query ([] if the database cannot be reached)."""
+        return self._run(sql, params, fetch=True) or []
+
+    def _run(self, sql: str, params, fetch: bool):
         with self._lock:
             for attempt in (1, 2):
                 try:
@@ -132,7 +152,7 @@ class Database:
                         self._conn = self._connect()
                     with self._conn.cursor() as cur:
                         cur.execute(sql, params)
-                    return
+                        return cur.fetchall() if fetch else None
                 except Exception as exc:  # noqa: BLE001 - best-effort observation channel
                     try:
                         if self._conn is not None:
@@ -236,13 +256,28 @@ class Database:
         )
 
 
+    def hospital_key(self, *, node_id: str, display_name: str, signing_public_key: str | None, tls_pin: str | None,
+                     observer_token_sha256: str | None = None, enrolled: bool = False) -> None:
+        """The directory's record of a hospital's keys (a token hash, once set, is kept until re-enrollment)."""
+        self._execute(
+            """INSERT INTO hospital_keys (node_id, display_name, signing_public_key, tls_pin, observer_token_sha256, enrolled)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON CONFLICT (node_id) DO UPDATE SET
+                   display_name = EXCLUDED.display_name, signing_public_key = EXCLUDED.signing_public_key,
+                   tls_pin = EXCLUDED.tls_pin, enrolled = hospital_keys.enrolled OR EXCLUDED.enrolled,
+                   observer_token_sha256 = COALESCE(EXCLUDED.observer_token_sha256, hospital_keys.observer_token_sha256),
+                   updated_at = now()""",
+            (node_id, display_name, signing_public_key, tls_pin, observer_token_sha256, enrolled),
+        )
+
+
 class NullDatabase(Database):
     """Used when no DATABASE_URL is set (unit tests, local experiments)."""
 
     def __init__(self):
         super().__init__("")
 
-    def _execute(self, sql, params=None):  # noqa: D401
+    def _run(self, sql, params, fetch):  # noqa: D401
         return None
 
     def wait_until_ready(self, timeout_s: float = 60) -> bool:

@@ -37,8 +37,10 @@ log = logging.getLogger("medchain.db")
 
 WRITE_METHODS = {
     "ensure_schema", "register_node", "heartbeat", "create_run", "round_started", "round_finished",
-    "update_sent", "record_metrics", "audit", "membership",
+    "update_sent", "record_metrics", "audit", "membership", "hospital_key",
 }
+# writes only the hub's own services make: never accepted from a node through the observer's /ingest
+HUB_ONLY = {"ensure_schema", "hospital_key"}
 BATCH = 200
 
 

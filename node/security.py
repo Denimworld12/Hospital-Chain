@@ -17,18 +17,25 @@ certificate key is pinned to the one on record for that party (node/pinning.py).
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import hashlib
+import ipaddress
 from pathlib import Path
-from typing import Mapping
+from typing import Iterable, Mapping
 
+from cryptography import x509
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from .wire import H_SIGNATURE
 
 _PREFIX = "x-medchain-"
 _UNSIGNED = {H_SIGNATURE.lower(), "x-medchain-secret"}  # the signature itself; the secret never goes in a log
+
+
+CERT_VALID_DAYS = 3650
 
 
 class SignatureError(Exception):
@@ -87,3 +94,26 @@ def verify(pub: Ed25519PublicKey, signature: str | None, body: bytes, headers: M
     except (InvalidSignature, ValueError, TypeError) as exc:
         raise SignatureError("signature does not verify") from exc
 
+
+
+def san(host: str) -> x509.GeneralName:
+    try:
+        return x509.IPAddress(ipaddress.ip_address(host))
+    except ValueError:
+        return x509.DNSName(host)
+
+
+def issue_certificate(ca_cert: x509.Certificate, ca_key, public_key, name: str, hosts: Iterable[str],
+                      days: int = CERT_VALID_DAYS) -> x509.Certificate:
+    """A TLS certificate for `public_key`, signed by the network CA: CN `name`, SAN `hosts` (scripts/pki.py and
+    the directory's join-code enrollment, directory/enroll.py, both issue them)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    return (x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))
+            .issuer_name(ca_cert.subject).public_key(public_key).serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(minutes=5)).not_valid_after(now + dt.timedelta(days=days))
+            .add_extension(x509.SubjectAlternativeName([san(h) for h in dict.fromkeys(hosts)]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]),
+                           critical=False)
+            .sign(ca_key, hashes.SHA256()))

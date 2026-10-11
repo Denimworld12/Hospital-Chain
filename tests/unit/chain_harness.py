@@ -175,9 +175,9 @@ class _Server:
 
 
 class DirectoryServer(_Server):
-    def __init__(self, config_path: Path):
+    def __init__(self, config_path: Path, database=None):
         self.cfg = load_directory_config(config_path)
-        self.app = create_directory_app(self.cfg)
+        self.app = create_directory_app(self.cfg, database=database)
         self.verify = self.cfg.ca or True
         self._serve(self.app, self.cfg.port, self.cfg.tls_cert, self.cfg.tls_key, self.cfg.ca)
 

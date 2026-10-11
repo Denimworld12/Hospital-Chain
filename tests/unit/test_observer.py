@@ -99,3 +99,51 @@ def test_a_node_pushes_its_telemetry_to_the_observer_over_pinned_tls(tmp_path):
     finally:
         node.stop(abrupt=True)
         observer.stop(abrupt=True)
+
+
+class KeysDatabase(RecordingDatabase):
+    """hospital_keys as the directory wrote them: one enrolled hospital with its own token."""
+
+    def __init__(self, owners: dict[str, str]):
+        super().__init__()
+        self.owners = owners
+
+    def fetch(self, sql, params=None):
+        return [(self.owners[params[0]],)] if "hospital_keys" in sql and params[0] in self.owners else []
+
+    def heartbeat(self, node_id, run_id, run_state, current_round):
+        self.audits.append({"event": "heartbeat", "node_id": node_id})
+
+
+def test_an_enrolled_hospitals_own_token_writes_only_as_that_hospital(tmp_path):
+    import hashlib
+
+    from chain_harness import free_ports, issue_pki
+
+    pki_dir = issue_pki(tmp_path, ["hospital-a"])
+    pki.ensure_identity(pki_dir, "observer", ["127.0.0.1", "localhost"], credential=False)
+    own = "node-1-own-token"
+    db = KeysDatabase({hashlib.sha256(own.encode()).hexdigest(): "node-1"})
+    (port,) = free_ports(1)
+    observer = ObserverServer(port, pki_dir, db).start()
+    try:
+        url, ca = f"{observer.url}/ingest", str(pki_dir / "ca.crt")
+
+        def post(token, node_id, items):
+            return httpx.post(url, json={"node_id": node_id, "items": items}, verify=ca, timeout=5,
+                              headers={"Authorization": f"Bearer {token}"})
+
+        beat = lambda n: {"kind": "heartbeat", "payload": {"node_id": n, "run_id": None, "run_state": "idle",  # noqa: E731
+                                                          "current_round": 0}}
+        assert post(own, "node-1", [beat("node-1")]).json()["applied"] == 1
+        assert post(own, "hospital-a", [beat("hospital-a")]).status_code == 403, "another hospital's batch"
+        assert post(own, "node-1", [beat("hospital-a")]).status_code == 403, "another hospital's row"
+        assert post("not-a-token", "node-1", [beat("node-1")]).status_code == 401
+        # the network token still works for kit hospitals; neither token can write the directory's key records
+        assert post(TOKEN, "hospital-a", [beat("hospital-a")]).json()["applied"] == 1
+        keys = {"kind": "hospital_key", "payload": {"node_id": "node-1", "display_name": "x",
+                                                    "signing_public_key": None, "tls_pin": None}}
+        assert post(own, "node-1", [keys]).json()["applied"] == 0
+        assert post(TOKEN, "hospital-a", [keys]).json()["applied"] == 0
+    finally:
+        observer.stop(abrupt=True)

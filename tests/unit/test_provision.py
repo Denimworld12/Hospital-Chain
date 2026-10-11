@@ -129,6 +129,10 @@ def test_one_run_provisions_every_hospital_and_the_hub(tmp_path, monkeypatch):
     assert not any((d / "pki" / n).exists() for n in ids), "the directory gets no hospital's private keys"
     dcfg = yaml.safe_load((d / "config/directory.yaml").read_text())
     assert dcfg["port"] == 8100 and dcfg["hospitals_file"] == "/pki/directory/hospitals.yaml"
+    # the hub signs join-code hospitals' certificates: its kit, and only its kit, holds the CA key
+    assert dcfg["enrollment"]["ca_key"] == "/pki/ca.key" and dcfg["enrollment"]["observer_port"] == 8200
+    assert (d / "pki/ca.key").read_bytes() == (tmp_path / ".pki/ca.key").read_bytes()
+    assert not any((tmp_path / n / "pki/ca.key").exists() for n in ids)
     assert {"100.101.1.99", "localhost"} <= sans(d / "pki/directory/tls.crt")
     # its hub.env runs deploy/hub.yml: laid out like the example, listening on the hub's Tailscale IP
     hub = provision.read_env((d / "hub.env").read_text())

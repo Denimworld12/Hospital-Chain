@@ -74,18 +74,27 @@ services:
     restart: "no"
 
   # Membership only: decides where a hospital goes and who bridges when one leaves. Its own
-  # SQLite store (the directory-data volume), not the dashboard's Postgres.
+  # SQLite store (the directory-data volume), not the dashboard's Postgres; it only writes the
+  # audit log and the hospitals' keys on record there. It also takes join codes (POST /enroll).
   directory:
     image: medchain-node:latest
     container_name: directory
     command: ["python", "-m", "directory"]
     environment:
       DIRECTORY_CONFIG: /config/directory.yaml
+      DATABASE_URL: postgresql://medchain:medchain@postgres:5432/medchain
+      # handed to hospitals that enroll with a join code (must match shared_secret in config/hospital-*.yaml)
+      MEDCHAIN_SHARED_SECRET: ${MEDCHAIN_SHARED_SECRET:-medchain-demo-secret}
     volumes:
       - ./config/directory.yaml:/config/directory.yaml:ro
       - ./.pki:/pki:ro
       - directory-data:/data
+      - hub-secrets:/hub
+      - ./data/slices:/slices:ro
+      - ./config/hospital-a.yaml:/templates/node.yaml:ro
     depends_on:
+      postgres:
+        condition: service_healthy
       pki:
         condition: service_completed_successfully
     ports:
@@ -225,6 +234,7 @@ services:
 
 volumes:
   directory-data:
+  hub-secrets:
   checkpoints-a:
   checkpoints-b:
   checkpoints-c:
