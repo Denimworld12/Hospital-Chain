@@ -667,6 +667,47 @@ def favicon() -> str:
     )
 
 
+def place(markup: str, x: float, y: float, w: float, h: float, rotate: float = 0) -> str:
+    """Nest one generated SVG inside another at (x, y), w x h, optionally tilted about its centre."""
+    inner = markup.strip().replace("<svg ", f'<svg x="{fmt(x)}" y="{fmt(y)}" width="{fmt(w)}" height="{fmt(h)}" ', 1)
+    if rotate:
+        return f'<g transform="rotate({fmt(rotate)} {fmt(x + w / 2)} {fmt(y + h / 2)})">{inner}</g>'
+    return inner
+
+
+def banner() -> str:
+    """README header: the existing mark, blobs, hospitals and chain on the cream canvas."""
+    w, h = 1280, 360
+    title = "MedChain: hospitals training one heart-disease model together, patient data stays home"
+    sans = "'DM Sans', 'Helvetica Neue', Arial, sans-serif"
+    label = "'Jost', 'Helvetica Neue', Arial, sans-serif"
+    display = "'Bebas Neue', 'Oswald', Impact, 'Arial Narrow', sans-serif"
+    b = [
+        f'<rect width="{w}" height="{h}" rx="16" fill="#fbf9f6"/>',
+        place(blob(3, GOLD, "Honey-gold accent blob", lobes=6), 800, -80, 320, 320),
+        place(blob(8, SAGE, "Mint-sage accent blob", lobes=5, stretch=(0.9, 1.05)), 630, 180, 220, 220),
+        place(blob(13, ORANGE, "Burnt-orange accent blob", lobes=7, wobble=0.13), 1160, 240, 130, 130),
+        # the chain runs under the three hospitals, one above each node
+        place(network_chain(), 660, 150, 580, 209),
+        place(hospital_small(), 677, 158, 120, 110, rotate=-5),
+        place(hospital_medium(), 860, 50, 180, 160),
+        place(hospital_large(), 1088, 132, 150, 131, rotate=5),
+        place(favicon(), 72, 78, 72, 72),
+        f'<text x="160" y="146" font-family="{display}" font-size="96" letter-spacing="4" fill="{INDIGO}">MEDCHAIN</text>',
+        f'<text x="76" y="200" font-family="{label}" font-size="15" letter-spacing="3.6" fill="{INDIGO}">'
+        "DECENTRALIZED LEARNING FOR HOSPITALS</text>",
+        f'<text x="76" y="244" font-family="{sans}" font-size="19" fill="#000000">'
+        "One heart-disease model, trained along a chain of hospitals.</text>",
+        f'<text x="76" y="272" font-family="{sans}" font-size="19" fill="#000000">'
+        "Only signed model updates travel. Patient data stays home.</text>",
+        place(ecg_wave(), 76, 296, 460, 31),
+    ]
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" role="img" aria-label="{title}">'
+        f"<title>{title}</title>{''.join(b)}</svg>\n"
+    )
+
+
 FILES = {
     "hospital-building.svg": hospital_large,
     "hospital-building-md.svg": hospital_medium,
@@ -682,6 +723,7 @@ FILES = {
     "blob-orange.svg": lambda: blob(13, ORANGE, "Burnt-orange accent blob", lobes=7, wobble=0.13),
     "wave-divider.svg": wave_divider,
     "favicon.svg": favicon,
+    "banner.svg": banner,
 }
 
 
