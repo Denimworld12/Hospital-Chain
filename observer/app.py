@@ -84,9 +84,15 @@ PROOF_MAX_BYTES = 16 * 1024
 PROOF_MAX_SKEW_S = 600  # a message older (or newer) than this is refused, whatever the laptops' clocks say
 
 
-def own_writes(items: list[Item], node_id: str) -> bool:
-    """A hospital's own token writes only as that hospital: no item may name another node (as node_id or sender)."""
-    return all(item.payload.get(k, node_id) == node_id for item in items for k in ("node_id", "sender"))
+# the field that says whose write an item is: the node that sent the update for update_sent, else node_id
+# (an audit row names its writer as node_id; its sender may be a neighbour, as on a received /update)
+IDENTITY = {"update_sent": "sender"}
+
+
+def foreign(item: Item, owner: str) -> bool:
+    """True if this item would write as a hospital other than `owner` (a kind with no such field is not)."""
+    field = IDENTITY.get(item.kind, "node_id")
+    return field in item.payload and item.payload[field] != owner
 
 
 def create_app(settings: ObserverSettings | None = None, database: Database | None = None) -> FastAPI:
@@ -117,16 +123,18 @@ def create_app(settings: ObserverSettings | None = None, database: Database | No
         owners[digest] = (time.monotonic(), rows[0][0] if rows else None)
         return owners[digest][1]
 
-    async def authorize(request: Request, node_id: str, items: list[Item] = ()) -> None:
+    async def authorize(request: Request, node_id: str) -> str | None:
+        """None for the network token; else the hospital whose own token this is (it must be `node_id`)."""
         auth = request.headers.get("Authorization", "")
         given = auth[7:].encode() if auth.startswith("Bearer ") else b""
         if given and hmac.compare_digest(given, token):
-            return  # the network token (kit hospitals, the single-machine stack)
+            return None  # the network token (kit hospitals, the single-machine stack)
         owner = await asyncio.to_thread(token_owner, hashlib.sha256(given).hexdigest()) if given else None
         if owner is None:
             raise HTTPException(401, detail="a valid observer token is required")
-        if owner != node_id or not own_writes(items, owner):
+        if owner != node_id:
             raise HTTPException(403, detail=f"this token belongs to {owner}: it writes only as {owner}")
+        return owner
 
     last_seen: dict[str, tuple[str, int]] = {}  # node -> (boot id, seq) of its last accepted proof
 
@@ -148,11 +156,15 @@ def create_app(settings: ObserverSettings | None = None, database: Database | No
         last_seen[sender] = (boot, seq)
         return msg, hashlib.sha256(rows[0][0].encode()).hexdigest()[:16]
 
-    def apply(batch: Batch) -> tuple[int, list[str]]:
+    def apply(batch: Batch, owner: str | None) -> tuple[int, list[str]]:
+        """Apply each item; refuse (only) the ones of an unknown kind, or that write as another hospital."""
         applied, rejected = 0, []
         for i, item in enumerate(batch.items):
             if item.kind not in KINDS:
                 rejected.append(f"{i}: unknown kind {item.kind!r}")
+                continue
+            if owner is not None and foreign(item, owner):
+                rejected.append(f"{i}: {item.kind}: {owner}'s token writes only as {owner}")
                 continue
             try:
                 getattr(db, item.kind)(**item.payload)
@@ -167,9 +179,9 @@ def create_app(settings: ObserverSettings | None = None, database: Database | No
 
     @app.post("/ingest")
     async def ingest(batch: Batch, request: Request):
-        await authorize(request, batch.node_id, batch.items)
+        owner = await authorize(request, batch.node_id)
         async with write_lock:  # one batch at a time, in arrival order
-            applied, rejected = await asyncio.to_thread(apply, batch)
+            applied, rejected = await asyncio.to_thread(apply, batch, owner)
         if rejected:
             log.warning("batch from %s: %d rejected (%s)", batch.node_id, len(rejected), "; ".join(rejected[:3]))
         return {"applied": applied, "rejected": rejected}

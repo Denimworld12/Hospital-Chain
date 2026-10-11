@@ -142,6 +142,7 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
     async def proof_loop(runner: Runner, prover: proof.Prover) -> None:
         """Signed facts about this machine, for the dashboard (node/proof.py). Never waited for by training."""
         while True:
+            await asyncio.sleep(PROOF_INTERVAL_S)  # the first one after registration has had a moment
             try:
                 body, headers = prover.message(await proof.neighbour_rtts(runner.client, runner.neighbours))
                 resp = await runner.client.post(f"{cfg.observer.url}/proof", content=body,
@@ -150,7 +151,6 @@ def create_app(cfg: NodeConfig | None = None, database: Database | None = None) 
                     log.warning("observer refused my proof-of-origin message: %s %s", resp.status_code, resp.text[:200])
             except httpx.HTTPError as exc:
                 log.debug("proof-of-origin message not delivered: %s", exc)
-            await asyncio.sleep(PROOF_INTERVAL_S)
 
     def take_membership(doc: Membership, via: str) -> str:
         """Verify the directory's signature, then apply or schedule the document."""

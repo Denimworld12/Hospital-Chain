@@ -51,6 +51,8 @@ def host_facts(now: float | None = None) -> dict:
         booted = float(env["booted_at"]) if env["booted_at"] else None
     except ValueError:
         booted = None
+    if booted is not None and not 0 <= now - booted < 10 * 365 * 86400:  # not a boot time: report no uptime
+        booted = None
     if env["hostname"]:
         return {"source": "host, read by the install script", "hostname": env["hostname"], "os": env["os"] or None,
                 "uptime_s": round(now - booted) if booted else None, "tailscale_device": env["tailscale_device"] or None}

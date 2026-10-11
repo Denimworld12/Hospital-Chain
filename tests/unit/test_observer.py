@@ -149,13 +149,24 @@ def test_an_enrolled_hospitals_own_token_writes_only_as_that_hospital(tmp_path):
                                                           "current_round": 0}}
         assert post(own, "node-1", [beat("node-1")]).json()["applied"] == 1
         assert post(own, "hospital-a", [beat("hospital-a")]).status_code == 403, "another hospital's batch"
-        assert post(own, "node-1", [beat("hospital-a")]).status_code == 403, "another hospital's row"
+        # in its own batch, only a row written as another hospital is refused, never the rest of the batch
+        received = {"kind": "audit", "payload": {"node_id": "node-1", "event": "update_received", "sender": "hospital-a",
+                                                 "receiver": "node-1"}}
+        sent = {"kind": "update_sent", "payload": {"run_id": "r", "round_num": 1, "sender": "node-1",
+                                                   "receiver": "hospital-a", "payload_bytes": 12,
+                                                   "full_precision_bytes": 128, "bits": 2, "dtype": "qgadmm-packet",
+                                                   "checksum": "c", "status": "delivered"}}
+        forged = {**sent, "payload": {**sent["payload"], "sender": "hospital-a", "receiver": "node-1"}}
+        r = post(own, "node-1", [received, beat("hospital-a"), sent, forged])
+        assert r.status_code == 200 and r.json()["applied"] == 2, r.json()
+        assert [x.split(":")[0] for x in r.json()["rejected"]] == ["1", "3"]
+        assert db.events("update_received")[0]["sender"] == "hospital-a"
         assert post("not-a-token", "node-1", [beat("node-1")]).status_code == 401
         # the network token still works for kit hospitals; neither token can write the directory's key records
         assert post(TOKEN, "hospital-a", [beat("hospital-a")]).json()["applied"] == 1
         keys = {"kind": "hospital_key", "payload": {"node_id": "node-1", "display_name": "x",
                                                     "signing_public_key": None, "tls_pin": None}}
-        assert post(own, "node-1", [keys]).json()["applied"] == 0
+        assert post(own, "node-1", [keys]).json()["applied"] == 0, "a key record, even as itself"
         assert post(TOKEN, "hospital-a", [keys]).json()["applied"] == 0
     finally:
         observer.stop(abrupt=True)
