@@ -114,9 +114,12 @@ MEDCHAIN_TAILSCALE_DEVICE=$DEVICE
 ENV_FILE="$DIR/.env"
 NODE_ID=$(sed -n 's/^NODE_ID=//p' "$ENV_FILE" 2>/dev/null | head -n 1)
 USER_FLAG=()
+RECREATE=()
 [ "$(uname)" = Linux ] && USER_FLAG=(--user "$(id -u):$(id -g)")  # the kit's files belong to you, not root
 if [ -n "$NODE_ID" ] && [ -f "$DIR/pki/$NODE_ID/tls.crt" ]; then
   ok "This computer is already enrolled ($NODE_ID); keeping its keys"
+  # the node checks in with the hub only when it starts: recreate it, so step 9 sees the hub's answer of now
+  RECREATE=(--force-recreate)
   # refresh what can change: this computer's Tailscale address, its facts, and its port when MEDCHAIN_PORT asks
   # for another one (peers pin the key, not the address: no new join code is needed)
   NODE_PORT=${MEDCHAIN_PORT:-$(sed -n 's/^NODE_PORT=//p' "$ENV_FILE" | head -n 1)}
@@ -163,7 +166,7 @@ fi
 
 # ---- 8. Start (or restart) the hospital --------------------------------------------------------
 printf '\n'
-docker compose --project-directory "$DIR" -f "$DIR/deploy/node.yml" up -d ||
+docker compose --project-directory "$DIR" -f "$DIR/deploy/node.yml" up -d ${RECREATE[@]+"${RECREATE[@]}"} ||
   problem "Docker could not start the hospital." \
           "If it says 'port is already allocated', another program uses port $PORT: stop it, or set MEDCHAIN_PORT to another port and run the same command again (no new join code needed). Otherwise restart Docker and run this again."
 UP="docker compose --project-directory \"$DIR\" -f \"$DIR/deploy/node.yml\""

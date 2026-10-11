@@ -145,6 +145,7 @@ function Install-MedChain {
             $enrolled = $true
         }
     }
+    $rerun = $enrolled
     if ($enrolled) {
         Ok "This laptop is already enrolled ($($idLine.Matches[0].Groups[1].Value)); keeping its keys"
         # refresh what can change: this laptop's Tailscale address, its facts, and its port when MEDCHAIN_PORT asks
@@ -218,7 +219,9 @@ function Install-MedChain {
     # ---- 8. Start (or restart) the hospital --------------------------------------------------------
     Say ""
     $compose = [IO.Path]::Combine($Dir, "deploy", "node.yml")
-    docker compose --project-directory $Dir -f $compose up -d
+    # the node checks in with the hub only when it starts: on a re-run recreate it, so step 9 sees the hub's answer of now
+    $recreate = if ($rerun) { @("--force-recreate") } else { @() }
+    docker compose --project-directory $Dir -f $compose up -d @recreate
     if ($LASTEXITCODE -ne 0) {
         Problem "Docker could not start the hospital." "If it says 'port is already allocated', another program uses port ${Port}: close it, or set `$env:MEDCHAIN_PORT to another port and run the same command again (no new join code needed). Otherwise restart Docker Desktop and run this again."
         return

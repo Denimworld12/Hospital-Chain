@@ -101,6 +101,12 @@ def test_a_hospital_the_organiser_removed_is_told_so_instead_of_done(tmp_path):
     assert r.returncode == 1 and "Done" not in r.stdout
     assert "organiser removed this computer" in r.stderr and "new join code" in r.stderr
     assert calls.splitlines()[-1].endswith("down"), "the refused node is stopped, not left retrying"
+    # the node checks in with the hub only when it starts: a re-run recreates it before asking, so a node that
+    # kept running since before the removal is not reported as registered
+    lines = calls.splitlines()
+    up = next(i for i, c in enumerate(lines) if c.startswith("docker compose") and " up -d" in c)
+    check = next(i for i, c in enumerate(lines) if "node.registered" in c)
+    assert "--force-recreate" in lines[up].split() and up < check
     # a Docker hiccup while stopping it still reports the refusal
     r, _ = run_installer(tmp_path, REGISTER_EXIT="3", DOWN_EXIT="1")
     assert r.returncode == 1 and "Done" not in r.stdout
