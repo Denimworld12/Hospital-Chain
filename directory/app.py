@@ -15,6 +15,10 @@ What it does, and only this:
                      kit: it gets its certificate, pins and node id (directory/enroll.py).
     /admin/join-codes  create, list and revoke join codes; for the dashboard's admin page, with
                      the hub's admin token (`admin_token_file`, made on first start).
+    POST /admin/members/{id}/remove
+                     the organiser takes a hospital out on its behalf (a laptop that is off or
+                     gone): the same bridge as /leave, and an enrolled hospital is forgotten too,
+                     which frees its display name.
 
 So it does coordinate membership: it decides where a new hospital goes and tells
 the existing hospitals who to connect to. Placement: while no run is in progress,
@@ -130,6 +134,14 @@ class Revoke(BaseModel):
     revoked_by: str | None = None
 
 
+class Remove(BaseModel):
+    removed_by: str | None = None
+
+
+OLD_HUB_KIT = ("re-run scripts/provision.py with the same --pki and `--hospital directory --force` (keys are kept), "
+               "set IMAGE_VERSION=v1.1.0 in its hub.env, then run make hub again")
+
+
 MAX_ENROLL_BYTES = 64 * 1024
 
 
@@ -166,9 +178,21 @@ def create_app(cfg: DirectoryConfig | None = None, database: Database | None = N
         """{id: display name} of every hospital in the directory's documents (the current and earlier chains)."""
         return {m.id: m.display_name or m.id for doc in reversed(store.recent(1000)) for m in doc.members.values()}
 
-    enroller = (Enroller(cfg.enrollment, store, signing_key=key, directory_cert=cfg.tls_cert,
-                         configured_ids=lambda: [str(h["id"]) for h in configured()], member_names=member_names)
-                if cfg.enrollment and cfg.tls_cert else None)
+    # why this hub cannot take join codes (None: it can); a hub kit made before join codes has neither the
+    # `enrollment:` block nor the CA key
+    if not cfg.enrollment:
+        no_enrollment = f"this hub's directory kit was made before join codes: {OLD_HUB_KIT}"
+    elif not cfg.tls_cert:
+        no_enrollment = "this directory serves no TLS (`tls:` in its config), and join codes need it"
+    elif not Path(cfg.enrollment.ca_key).is_file():
+        no_enrollment = f"this hub kit has no CA key at {cfg.enrollment.ca_key}: {OLD_HUB_KIT}"
+    else:
+        no_enrollment = None
+    if no_enrollment:
+        log.warning("join codes unavailable: %s", no_enrollment)
+    enroller = (None if no_enrollment else
+                Enroller(cfg.enrollment, store, signing_key=key, directory_cert=cfg.tls_cert,
+                         configured_ids=lambda: [str(h["id"]) for h in configured()], member_names=member_names))
 
     def audit(event: str, node_id: str | None, detail: dict, sender: str | None = None) -> None:
         """The directory's own log, and the dashboard's audit log."""
@@ -185,8 +209,7 @@ def create_app(cfg: DirectoryConfig | None = None, database: Database | None = N
 
     def require_enrollment() -> Enroller:
         if enroller is None:
-            raise HTTPException(503, detail="this hub does not take join codes (its directory config has no "
-                                            "`enrollment:` block, or no `tls:`)")
+            raise HTTPException(503, detail=f"This hub cannot take join codes: {no_enrollment}.")
         return enroller
 
     def authenticate(request: Request, node_id: str) -> tuple[int, dict | None]:
@@ -325,8 +348,12 @@ def create_app(cfg: DirectoryConfig | None = None, database: Database | None = N
         # an enrolled hospital goes by the name it enrolled with, whatever its node says
         name = enrolled["display_name"] if enrolled else req.display_name
         me = Member(req.node_id, req.url.rstrip("/"), req.public_key, name, req.tls_spki_sha256)
+        # an enrolled hospital's own observer token is re-synced on every registration, so a lost write or a
+        # reset Postgres never locks its telemetry out
         db.hospital_key(node_id=req.node_id, display_name=name or req.node_id,
-                        signing_public_key=req.public_key, tls_pin=req.tls_spki_sha256)
+                        signing_public_key=req.public_key, tls_pin=req.tls_spki_sha256,
+                        observer_token_sha256=enrolled["observer_token_sha256"] if enrolled else None,
+                        enrolled=bool(enrolled))
         async with lock:
             latest = store.latest()
             chain = list(latest.chain) if latest else []
@@ -353,24 +380,52 @@ def create_app(cfg: DirectoryConfig | None = None, database: Database | None = N
             store.log("joined", req.node_id, {"epoch": doc.epoch, "rank": rank, "where": where, "effective_round": at})
             return {"membership": doc.to_dict(), "joined": True, "told": told}
 
+    async def take_out(node_id: str, verb: str) -> tuple[Membership, dict, list[str], int | None]:
+        """Schedule the chain without `node_id`; its two neighbours bridge to each other. Call holding `lock`."""
+        latest = store.latest()
+        if latest is None or node_id not in latest.chain:
+            raise HTTPException(409, detail=f"{node_id} is not in the chain")
+        chain = [m for m in latest.chain if m != node_id]
+        if len(chain) < MIN_CHAIN:
+            raise HTTPException(409, detail=f"a chain needs at least {MIN_CHAIN} hospitals")
+        i = latest.chain.index(node_id)
+        bridge = [latest.chain[j] for j in (i - 1, i + 1) if 0 <= j < len(latest.chain)]
+        run_id, at = await schedule(latest.chain)
+        members = {m: v for m, v in latest.members.items() if m != node_id}
+        how = f"{' and '.join(bridge)} bridge to each other" if len(bridge) == 2 else f"{bridge[0]} becomes the chain end"
+        doc, told = await issue(chain, members, f"{node_id} {verb}: {how}", run_id, at)
+        return doc, told, bridge, at
+
     @app.post("/leave")
     async def leave(req: LeaveRequest, request: Request):
         authenticate(request, req.node_id)
         async with lock:
-            latest = store.latest()
-            if latest is None or req.node_id not in latest.chain:
-                raise HTTPException(409, detail=f"{req.node_id} is not in the chain")
-            chain = [m for m in latest.chain if m != req.node_id]
-            if len(chain) < MIN_CHAIN:
-                raise HTTPException(409, detail=f"a chain needs at least {MIN_CHAIN} hospitals")
-            i = latest.chain.index(req.node_id)
-            bridge = [latest.chain[j] for j in (i - 1, i + 1) if 0 <= j < len(latest.chain)]
-            run_id, at = await schedule(latest.chain)
-            members = {m: v for m, v in latest.members.items() if m != req.node_id}
-            how = f"{' and '.join(bridge)} bridge to each other" if len(bridge) == 2 else f"{bridge[0]} becomes the chain end"
-            doc, told = await issue(chain, members, f"{req.node_id} left: {how}", run_id, at)
+            doc, told, bridge, at = await take_out(req.node_id, "left")
             store.log("left", req.node_id, {"epoch": doc.epoch, "bridge": bridge, "effective_round": at})
             return {"membership": doc.to_dict(), "told": told}
+
+    @app.post("/admin/members/{node_id}/remove")
+    async def remove_member(node_id: str, req: Remove, request: Request):
+        """The organiser takes a hospital out on its behalf: one that is off or gone cannot call /leave itself.
+        An enrolled hospital is also forgotten (its credential stops working and its name is free again); a kit
+        hospital stays in hospitals.yaml, so it rejoins if its node starts again."""
+        require_admin(request)
+        async with lock:
+            latest = store.latest()
+            in_chain = latest is not None and node_id in latest.chain
+            doc = told = None
+            if in_chain:
+                doc, told, bridge, at = await take_out(node_id, f"was removed by {req.removed_by or 'the organiser'}")
+            forgotten = store.remove_enrolled(node_id)
+            if forgotten:
+                db.hospital_forgotten(node_id=node_id)
+            if not in_chain and not forgotten:
+                raise HTTPException(404, detail=f"{node_id} is neither in the chain nor an enrolled hospital")
+            audit("member_removed", node_id, {"by": req.removed_by, "from_chain": in_chain, "forgotten": forgotten,
+                                              **({"epoch": doc.epoch, "bridge": bridge, "effective_round": at}
+                                                 if doc else {})}, sender=req.removed_by)
+            return {"node_id": node_id, "removed_from_chain": in_chain, "forgotten": forgotten,
+                    "epoch": doc.epoch if doc else None, "told": told}
 
     @app.get("/events")
     async def events(request: Request, limit: int = 100):

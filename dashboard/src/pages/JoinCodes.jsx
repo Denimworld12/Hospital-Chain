@@ -70,6 +70,20 @@ export default function JoinCodes() {
     load();
   };
 
+  // a hospital whose install failed or was abandoned still holds its name: forgetting it frees the name
+  const forget = async (h) => {
+    if (!window.confirm(`Forget ${h.display_name}? It is taken out of the chain if it is in it, its keys stop working and its name is free again.`)) return;
+    const res = await fetch(`/api/admin/members/${encodeURIComponent(h.node_id)}/remove`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    notAuthorized(res);
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) setMessage(out.detail || "Could not forget it.");
+    load();
+  };
+
   const revoke = async (codeId) => {
     const out = await call("POST", `/${codeId}/revoke`, {});
     if (!out.ok) setMessage(out.detail || "Could not revoke it.");
@@ -157,7 +171,7 @@ export default function JoinCodes() {
         <div className="journal-wrap">
           <table className="journal" data-testid="enrolled">
             <thead>
-              <tr><th>Name</th><th>Node id</th><th>Data slice</th><th>Code</th><th>Enrolled</th></tr>
+              <tr><th>Name</th><th>Node id</th><th>Data slice</th><th>Code</th><th>Enrolled</th><th /></tr>
             </thead>
             <tbody>
               {hospitals.map((h) => (
@@ -167,10 +181,11 @@ export default function JoinCodes() {
                   <td>{h.data_slice}</td>
                   <td className="checksum">{h.code_id}</td>
                   <td>{when(h.enrolled_at)}</td>
+                  <td><PillButton variant="secondary" onClick={() => forget(h)}>Forget</PillButton></td>
                 </tr>
               ))}
               {hospitals.length === 0 && (
-                <tr><td colSpan={5} className="journal__empty">None yet.</td></tr>
+                <tr><td colSpan={6} className="journal__empty">None yet.</td></tr>
               )}
             </tbody>
           </table>

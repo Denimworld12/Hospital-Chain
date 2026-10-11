@@ -266,7 +266,7 @@ to hit. "Preflight says" is the text after `unreachable`; "logs say" is from the
 | On a phone hotspot, **every** neighbour is `ConnectTimeout`, though the internet works | **Hotspot client isolation (audit H16).** Some phones (many Android ones) don't let devices on their hotspot talk to each other ("AP isolation" / "client isolation"). Nothing on the laptops can fix that. | Turn off "AP isolation" / "client isolation" in the phone's hotspot settings if it has the option, or use a different phone (iPhone hotspots let devices talk to each other), or go back to Tailscale. |
 | The dashboard shows your hospital as down after a while; the logs stop, then pick up again later | **Sleep (audit §3).** A sleeping laptop is a crashed hospital: its neighbours run "degraded" rounds without it. It rejoins on wake from the chain it saved in `data/`, even if the organiser's directory is down. | Step 4: plugged in, lid open, sleep off. After waking, run `docker compose --project-directory . -f deploy/node.yml ps`. If the hospital isn't "running" (Docker Desktop itself quit), open Docker Desktop and run the `up -d` command again. |
 | Tailscale is connected but neighbours are `ConnectTimeout`, or `tailscale status` shows the other laptops offline; or rounds are often slow | **Another VPN.** A work or personal VPN (Cisco AnyConnect, GlobalProtect, NordVPN, ...) can take over the routes Tailscale uses (`100.x` addresses) or block it. Tailscale then relays traffic through its servers (DERP, audit H5) or not at all. | Disconnect the other VPN for the session. In the Tailscale menu, check the organiser's laptop shows as connected. A relayed connection still works, just slower. If rounds keep timing out, the organiser can raise `ROUND_TIMEOUT_S` for everyone. |
-| Logs say `certificate is not yet valid` or `certificate has expired`; every connection fails | **Clock skew.** The kit's certificates are valid from five minutes before the organiser made them. A laptop clock that is more than about five minutes behind theirs rejects them, and theirs rejects yours. (A wrong clock doesn't make the dashboard mark you down: it uses the hub's own clock.) | Turn on automatic time. **Mac:** System Settings > General > Date & Time > "Set time and date automatically". **Windows:** Settings > Time & language > Date & time > "Set time automatically", then **Sync now**. Then run the `up -d` command again. |
+| Logs say `certificate is not yet valid` or `certificate has expired`; every connection fails | **Clock skew.** Certificates are valid from a day before the organiser (or the hub, for a join code) made them. A laptop clock that is more than a day behind theirs rejects them, and theirs rejects yours. (A wrong clock doesn't make the dashboard mark you down: it uses the hub's own clock.) | Turn on automatic time. **Mac:** System Settings > General > Date & Time > "Set time and date automatically". **Windows:** Settings > Time & language > Date & time > "Set time automatically", then **Sync now**. Then run the `up -d` command again. |
 | Logs say `directory registration failed (...); retrying` | The organiser's hub isn't reachable yet: it's not started, it's on another network, or `DIRECTORY_URL` is wrong. | Check `DIRECTORY_URL` with the organiser. The hospital keeps retrying by itself. If it was already training, it carries on meanwhile. |
 | Logs or preflight say `TLS key changed` / `tls_pin_mismatch` | Your kit's keys don't match what the directory has on record, usually because you have an older kit than the organiser's latest. | Ask the organiser for your current kit. Don't mix files from two kits. |
 | `required variable NODE_ID is missing a value` | The command ran outside the kit folder, or without `--project-directory .`. | `cd` into the kit folder (step 3) and copy the command exactly. |
@@ -283,7 +283,29 @@ Give it to one friend with the install command the page shows (it has your hub's
 address, `HUB_ADDRESS` in `hub.env`, in it). Each code works once and expires (30
 minutes by default); **Revoke** cancels one. Nobody types or receives the network
 secret by hand: it travels inside the enrollment. Watch **NODES** for each laptop's
-signed facts. The install scripts need the `v1.1.0` image and tag published (below).
+signed facts. The install scripts need the `v1.1.0` image and tag published (below);
+to try a test tag first, set `INSTALLER_VERSION` in `hub.env`.
+
+**A hub made before join codes** (its kit has no `pki/ca.key` and its directory config
+no `enrollment:` block) answers "This hub cannot take join codes" on the Join codes
+page. Upgrade it once: re-run `provision.py` with the same `--peers`, `--directory` and
+`--pki` as before plus `--hospital directory --force` (every key is kept, so no hospital
+needs a new kit), set `IMAGE_VERSION=v1.1.0` in the new `kits/directory/hub.env`, add
+`MEDCHAIN_ADMIN_PASSWORD`, and run `make hub` again.
+
+**A laptop that is off or gone.** A hospital that never answers splits the chain: the
+hospitals beyond it never hear "start". The control strip then says the run is
+**incomplete** and names who never took part. On **NODES**, **Remove** takes that
+hospital out on its behalf: its neighbours bridge to each other, as if it had left. A
+hospital that enrolled with a code is also forgotten (its keys stop working); on **JOIN
+CODES**, **Forget** does the same, and frees the name of an install that failed or was
+abandoned, so the friend can enroll again with a new code. A kit hospital you remove
+rejoins if its node starts again.
+
+**Another program on the hospital's port?** The friend sets `$env:MEDCHAIN_PORT` (or
+`MEDCHAIN_PORT=...` on a Mac) to a free port and runs the same command again: no new join
+code needed. **Postgres already running on the hub laptop?** Set `POSTGRES_PORT` in
+`hub.env`.
 
 You run the **hub** (the directory, the observer, Postgres and the dashboard) from
 a checkout of this repository. Run it with Docker on your own laptop.

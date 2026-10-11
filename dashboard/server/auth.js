@@ -97,18 +97,25 @@ export class Auth {
     Object.assign(this, { pool, adminUser, adminPassword, ready: null, lockout: new Lockout() });
   }
 
-  // Create the tables (and the account from DASHBOARD_ADMIN_PASSWORD) once Postgres answers.
+  // Create the tables, and make the one account match DASHBOARD_ADMIN_PASSWORD, once Postgres answers. A changed
+  // password (or username) replaces the old one and ends every existing session.
   async init() {
     this.ready ||= (async () => {
       await this.pool.query(SCHEMA);
       if (this.adminPassword) {
         const problem = checkNewPassword(this.adminUser, this.adminPassword);
         if (problem) throw new Error(`DASHBOARD_ADMIN_PASSWORD: ${problem}`);
-        const hash = await bcrypt.hash(this.adminPassword, BCRYPT_COST);
-        await this.pool.query(
-          `INSERT INTO admin_users (username, password_hash) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-          [this.adminUser, hash],
-        );
+        const { rows } = await this.pool.query(`SELECT username, password_hash FROM admin_users`);
+        const same = rows[0]?.username === this.adminUser && (await bcrypt.compare(this.adminPassword, rows[0].password_hash));
+        if (!same) {
+          const hash = await bcrypt.hash(this.adminPassword, BCRYPT_COST);
+          await this.pool.query(`DELETE FROM admin_sessions`);
+          await this.pool.query(
+            `INSERT INTO admin_users (username, password_hash) VALUES ($1, $2)
+             ON CONFLICT (one_admin) DO UPDATE SET username = EXCLUDED.username, password_hash = EXCLUDED.password_hash`,
+            [this.adminUser, hash],
+          );
+        }
       }
     })().catch((err) => {
       this.ready = null; // try again on the next request

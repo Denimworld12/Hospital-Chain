@@ -1228,3 +1228,7 @@ a {
   border: var(--mc-hairline);
   padding: var(--spacing-8) var(--spacing-12);
 }
+
+.control-strip__run .bad {
+  color: var(--color-burnt-orange);
+}

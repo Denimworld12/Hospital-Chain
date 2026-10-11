@@ -215,16 +215,21 @@ def test_proof_of_origin_is_accepted_only_with_the_hospitals_key_on_record(tmp_p
         assert post(forged, fh).status_code == 403
         unknown, uh = proof.Prover("hospital-b", key_b, 1, "x").message({})
         assert post(unknown, uh).status_code == 403
+        for _ in range(3):  # a node that keeps failing (it retries every 10 s) does not flood the audit log
+            assert post(forged, fh).status_code == 403
         reasons = [a["detail"]["reason"] for a in db.events("proof_rejected")]
-        assert len(reasons) == 4 and "replayed" in reasons[0] and "signature" in reasons[1] and "signature" in reasons[2]
-        assert "no signing key is on record for hospital-b" in reasons[3]
-        assert [r["node_id"] for r in db.rejections] == ["hospital-a"] * 3, "shown on the dashboard for a known hospital"
-        stale = json.loads(prover.message({})[0])
-        stale["sent_at"] -= 3600
-        sb = json.dumps(stale).encode()
+        assert len(reasons) == 3, "one row per hospital and reason in the window: both bad signatures share one"
+        assert "replayed" in reasons[0] and "signature" in reasons[1]
+        assert "no signing key is on record for hospital-b" in reasons[2]
+        assert [r["node_id"] for r in db.rejections] == ["hospital-a"] * 6, "the dashboard still shows every one"
+        # a laptop whose clock is an hour slow (a Docker VM after sleep) still counts: the skew is only shown
+        slow = json.loads(prover.message({})[0])
+        slow["sent_at"] -= 3600
+        sb = json.dumps(slow).encode()
         sh = {wire.H_SENDER: "hospital-a"}
         sh[wire.H_SIGNATURE] = security.sign(key_a, sb, sh, "proof")
-        assert "10 minutes" in post(sb, sh).json()["detail"]
+        assert post(sb, sh).status_code == 200
+        assert 3590 < db.proofs[-1]["message"]["clock_skew_s"] < 3610
     finally:
         observer.stop(abrupt=True)
 

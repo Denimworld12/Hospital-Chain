@@ -61,6 +61,11 @@ function ControlStrip({ snapshot }) {
           <EngineChip label={snapshot?.engine || "naive gossip baseline"} />
           <span className="control-strip__run" data-testid="run-state">
             {run ? `${run.run_id} / ${state}` : "No training run yet"}
+            {run?.missing?.length > 0 && (
+              <span className="bad" data-testid="run-missing">
+                {" "}- incomplete: {run.missing.map((n) => n.display_name).join(", ")} never took part
+              </span>
+            )}
           </span>
         </div>
         <div className="control-strip__actions">

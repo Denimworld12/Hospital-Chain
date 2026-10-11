@@ -192,10 +192,23 @@ async function proofRows(pool) {
   }
 }
 
+// The chain's hospitals that were registered before a run started but never took part in it (no round logged,
+// never on its run id): a laptop that was off, or one cut off behind it. A run that "completed" without them
+// did not train on their data, and the control strip says so.
+export function missingFromRun(run, nodes, topology, metrics) {
+  if (!run) return [];
+  const started = new Date(run.started_at).getTime();
+  return nodes
+    .filter((n) => (topology?.chain || []).includes(n.node_id))
+    .filter((n) => !n.registered_at || new Date(n.registered_at).getTime() <= started)
+    .filter((n) => n.run_id !== run.run_id && !(metrics[n.node_id] || []).length)
+    .map((n) => ({ node_id: n.node_id, display_name: n.display_name }));
+}
+
 export async function buildSnapshot(pool) {
   const nodesRes = await pool.query(
     `SELECT node_id, display_name, url, patients, neighbours, engine, run_id, run_state, current_round,
-            epoch, chain, in_chain, membership_round,
+            epoch, chain, in_chain, membership_round, registered_at,
             EXTRACT(EPOCH FROM (now() - last_heartbeat))::float AS seconds_since_heartbeat
        FROM nodes ORDER BY node_id`,
   );
@@ -263,7 +276,7 @@ export async function buildSnapshot(pool) {
     heartbeat_stale_after_s: STALE_AFTER_S,
     nodes,
     topology,
-    run: run ? { ...run, state: runState(run, nodes) } : null,
+    run: run ? { ...run, state: runState(run, nodes), missing: missingFromRun(run, nodes, topology, metrics) } : null,
     metrics,
     network_loss: networkLoss,
     consensus,

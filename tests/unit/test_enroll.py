@@ -25,6 +25,9 @@ class HubDatabase(RecordingDatabase):
         super().__init__()
         self.keys: dict[str, dict] = {}
 
+    def hospital_forgotten(self, *, node_id):
+        self.keys[node_id] = {**self.keys.get(node_id, {}), "observer_token_sha256": None, "enrolled": False}
+
     def hospital_key(self, **kw):
         self.keys[kw["node_id"]] = {**self.keys.get(kw["node_id"], {}),
                                     **{k: v for k, v in kw.items() if v is not None}}
@@ -147,10 +150,15 @@ def test_a_hospital_enrolls_with_a_join_code_and_joins_the_chain(hub, tmp_path, 
     assert (kit / "pki" / "network" / "shared_secret").read_text().strip() == "chain-test-secret"
     wait_until(lambda: hub.db.events("enrolled"), 5, "the enrollment in the audit log")
 
-    # it runs as a node: registers with its credential and keys, and joins the kit hospital's chain
+    # it runs as a node: registers with its credential and keys, and joins the kit hospital's chain; registering
+    # writes its own observer token's hash again, so a lost /enroll write (or a reset Postgres) heals itself
+    hub.db.keys.pop(node_id)
     node = NodeServer(kit / "config" / "node.yaml").start()
     hub.nodes.append(node)
     wait_until(lambda: node.status()["chain"] == ["hospital-a", node_id], 20, "both hospitals in the chain")
+    wait_until(lambda: hub.db.keys.get(node_id, {}).get("observer_token_sha256") == record["observer_token_sha256"],
+               5, "the token hash re-synced at registration")
+    assert hub.db.keys[node_id]["enrolled"] is True
     assert node.status()["display_name"] == "St Mary's Leeds"
     assert node.status()["patients"] == 62  # hospital-d.csv
 
@@ -265,3 +273,58 @@ def test_display_names_are_free_text_but_never_shared_and_ids_stay_stable(hub, t
     wait_until(lambda: node_id in hub.nodes[0].status()["chain"], 20, "the enrolled node in the chain")
     assert hub.directory.store.latest().members[node_id].display_name == "Royal Infirmary"
     wait_until(lambda: hub.db.keys.get(node_id, {}).get("display_name") == "Royal Infirmary", 5, "its key record")
+
+
+def test_forgetting_an_abandoned_enrollment_frees_its_name(hub):
+    """An install that enrolled but never started still holds its name until the organiser forgets it."""
+    ghost = enroll.request_enrollment(hub.hub, "St Mary's Leeds", hub.code(), ["127.0.0.1"], enroll.Keys.generate())
+    with pytest.raises(enroll.EnrollError, match="already called"):
+        enroll.request_enrollment(hub.hub, "St Mary's Leeds", hub.code(), ["127.0.0.1"], enroll.Keys.generate())
+    assert hub.admin("POST", f"/admin/members/{ghost['node_id']}/remove", token="nope", json={}).status_code == 401
+    out = hub.admin("POST", f"/admin/members/{ghost['node_id']}/remove", json={"removed_by": "admin"}).json()
+    assert (out["removed_from_chain"], out["forgotten"]) == (False, True)
+    wait_until(lambda: hub.db.keys.get(ghost["node_id"], {}).get("enrolled") is False, 5, "its token revoked")
+    assert hub.db.keys[ghost["node_id"]]["observer_token_sha256"] is None
+    again = enroll.request_enrollment(hub.hub, "St Mary's Leeds", hub.code(), ["127.0.0.1"], enroll.Keys.generate())
+    assert again["node_id"] != ghost["node_id"]
+    assert hub.admin("POST", "/admin/members/no-such-hospital/remove", json={}).status_code == 404
+    wait_until(lambda: hub.db.events("member_removed"), 5, "the removal in the audit log")
+
+
+def test_the_organiser_removes_a_hospital_that_is_gone_and_its_neighbours_bridge(tmp_path):
+    dir_cfg, cfgs = directory_configs(tmp_path, ["hospital-a", "hospital-b", "hospital-c"], engine="gossip")
+    dir_cfg.write_text(dir_cfg.read_text() + f"admin_token_file: {tmp_path / 'admin_token'}\n")
+    (tmp_path / "admin_token").write_text(ADMIN + "\n")
+    directory = DirectoryServer(dir_cfg).start()
+    nodes = {n: NodeServer(cfgs[n]).start() for n in cfgs}
+    try:
+        wait_until(lambda: nodes["hospital-a"].status()["chain"] == ["hospital-a", "hospital-b", "hospital-c"], 20,
+                   "all three placed")
+        nodes.pop("hospital-b").stop(abrupt=True)  # its laptop goes off: it can never call /leave
+        r = httpx.post(f"{directory.url}/admin/members/hospital-b/remove", json={"removed_by": "admin"},
+                       headers={"Authorization": f"Bearer {ADMIN}"}, verify=directory.verify, timeout=15)
+        assert r.status_code == 200 and r.json()["removed_from_chain"] and not r.json()["forgotten"], r.text
+        assert r.json()["told"]["hospital-b"].startswith("unreachable")
+        wait_until(lambda: nodes["hospital-a"].status()["chain"] == ["hospital-a", "hospital-c"] ==
+                   nodes["hospital-c"].status()["chain"], 20, "a and c bridged")
+        # a chain cannot shrink below two
+        r = httpx.post(f"{directory.url}/admin/members/hospital-c/remove", json={},
+                       headers={"Authorization": f"Bearer {ADMIN}"}, verify=directory.verify, timeout=15)
+        assert r.status_code == 409 and "at least 2" in r.json()["detail"]
+    finally:
+        for n in [*nodes.values(), directory]:
+            n.stop(abrupt=True)
+
+
+def test_a_hub_made_before_join_codes_says_how_to_upgrade(tmp_path):
+    dir_cfg, _ = directory_configs(tmp_path, ["hospital-a"])
+    dir_cfg.write_text(dir_cfg.read_text() + f"admin_token_file: {tmp_path / 'admin_token'}\n")
+    (tmp_path / "admin_token").write_text(ADMIN + "\n")
+    directory = DirectoryServer(dir_cfg).start()
+    try:
+        r = httpx.get(f"{directory.url}/admin/join-codes", headers={"Authorization": f"Bearer {ADMIN}"},
+                      verify=directory.verify, timeout=10)
+        assert r.status_code == 503
+        assert "made before join codes" in r.json()["detail"] and "provision.py" in r.json()["detail"]
+    finally:
+        directory.stop(abrupt=True)

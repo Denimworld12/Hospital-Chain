@@ -28,7 +28,7 @@ services:
       POSTGRES_PASSWORD: medchain
       POSTGRES_DB: medchain
     ports:
-      - "127.0.0.1:5432:5432"  # loopback only: hospitals never connect to Postgres, the observer does
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"  # loopback only: hospitals never connect to Postgres, the observer does
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -110,6 +110,8 @@ services:
       # the install commands the Join codes page shows: where hospitals reach this hub
       HUB_ADDRESS: ${HUB_ADDRESS:-}
       HUB_DIRECTORY_PORT: ${DIRECTORY_PORT:-8100}
+      # the release tag the install commands fetch the install scripts from (a test tag before a release)
+      INSTALLER_VERSION: ${INSTALLER_VERSION:-v1.1.0}
     volumes:
       - ${HUB_KIT}/pki/ca.crt:/pki/ca.crt:ro
       - hub-secrets:/hub:ro

@@ -283,6 +283,11 @@ class Database:
         )
 
 
+    def hospital_forgotten(self, *, node_id: str) -> None:
+        """The organiser removed an enrolled hospital: its own observer token stops working."""
+        self._execute("UPDATE hospital_keys SET observer_token_sha256 = NULL, enrolled = false, updated_at = now() "
+                      "WHERE node_id = %s", (node_id,))
+
     def proof_accepted(self, *, node_id: str, sent_at: float, boot_id: str, seq: int, message: dict,
                        key_fingerprint: str) -> None:
         """The observer verified this hospital's proof-of-origin message (never written through /ingest)."""

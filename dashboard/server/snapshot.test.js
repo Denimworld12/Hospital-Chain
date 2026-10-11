@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { commFrom, consensusFrom, currentTopology, hospitalsByRound, networkLossFrom, proofsFrom } from "./snapshot.js";
+import { commFrom, consensusFrom, currentTopology, hospitalsByRound, missingFromRun, networkLossFrom, proofsFrom } from "./snapshot.js";
 import { W, chainLinks, chainMembers, layout } from "../src/topologyLayout.js";
 
 const EPS = 1e-3;
@@ -230,4 +230,22 @@ test("proof of origin: verified only while the newest signed message is fresh an
   assert.equal(out["hospital-d"].status, "rejected");
   assert.equal(out["hospital-e"].status, "verified", "a later accepted message clears an older refusal");
   assert.equal(out["hospital-e"].rejection, null);
+});
+
+test("a run that never reached a chain member is flagged, not reported as plainly complete", () => {
+  const run = { run_id: "run-1", started_at: "2026-10-11T10:00:00Z" };
+  const topology = { chain: ["hospital-a", "dead-laptop", "st-marys-3f9a"] };
+  const nodes = [
+    { node_id: "hospital-a", display_name: "Hospital A", run_id: "run-1", registered_at: "2026-10-11T09:00:00Z" },
+    { node_id: "dead-laptop", display_name: "Dead Laptop", run_id: null, registered_at: "2026-10-11T09:00:00Z" },
+    { node_id: "st-marys-3f9a", display_name: "St Mary's", run_id: null, registered_at: "2026-10-11T09:30:00Z" },
+    { node_id: "late-joiner", display_name: "Late", run_id: null, registered_at: "2026-10-11T11:00:00Z" },
+  ];
+  const metrics = { "hospital-a": [{ round: 1 }] };
+  assert.deepEqual(missingFromRun(run, nodes, topology, metrics).map((n) => n.node_id), ["dead-laptop", "st-marys-3f9a"]);
+  // one that took part (it logged rounds, even if it has since moved on) is not missing
+  assert.deepEqual(missingFromRun(run, nodes, topology, { ...metrics, "dead-laptop": [{ round: 1 }], "st-marys-3f9a": [{ round: 2 }] }), []);
+  // a hospital that registered after the run started (or is not in the chain) is not counted
+  assert.deepEqual(missingFromRun(run, nodes, { chain: ["hospital-a", "late-joiner"] }, metrics), []);
+  assert.deepEqual(missingFromRun(null, nodes, topology, metrics), []);
 });

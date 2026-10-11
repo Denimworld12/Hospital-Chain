@@ -29,6 +29,8 @@ function Install-MedChain {
     function Say($text) { Write-Host $text }
     function Ok($text) { Write-Host "  [ok] $text" -ForegroundColor Green }
     function Problem($what, $fix) {
+        # a folder this run created and left empty goes again, so "nothing has been changed" stays true
+        if ($createdDir -and (Test-Path $Dir) -and -not (Get-ChildItem -Force $Dir)) { Remove-Item $Dir }
         Write-Host ""
         Write-Host "  [!] $what" -ForegroundColor Red
         Write-Host "      What to do: $fix" -ForegroundColor Yellow
@@ -133,6 +135,7 @@ function Install-MedChain {
     $env:MEDCHAIN_TAILSCALE_DEVICE = $device
 
     # ---- 7. Enroll (once) ---------------------------------------------------------------------------
+    $createdDir = -not (Test-Path $Dir)
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     $envFile = Join-Path $Dir ".env"
     $enrolled = $false
@@ -144,24 +147,38 @@ function Install-MedChain {
     }
     if ($enrolled) {
         Ok "This laptop is already enrolled ($($idLine.Matches[0].Groups[1].Value)); keeping its keys"
-        # refresh what can change: this laptop's Tailscale address and its facts
-        $keep = Get-Content $envFile | Where-Object { $_ -notmatch '^(ADVERTISE_ADDR|MEDCHAIN_HOST_NAME|MEDCHAIN_HOST_OS|MEDCHAIN_HOST_BOOTED_AT|MEDCHAIN_TAILSCALE_DEVICE)=' }
-        $nodePort = (Select-String -Path $envFile -Pattern '^NODE_PORT=(\d+)$' | Select-Object -First 1).Matches[0].Groups[1].Value
-        $lines = @($keep) + @("ADVERTISE_ADDR=${tsIp}:$nodePort", "MEDCHAIN_HOST_NAME=$env:MEDCHAIN_HOST_NAME",
+        # refresh what can change: this laptop's Tailscale address, its facts, and its port when MEDCHAIN_PORT asks
+        # for another one (peers pin the key, not the address: no new join code is needed)
+        $keep = Get-Content $envFile | Where-Object { $_ -notmatch '^(NODE_PORT|ADVERTISE_ADDR|MEDCHAIN_HOST_NAME|MEDCHAIN_HOST_OS|MEDCHAIN_HOST_BOOTED_AT|MEDCHAIN_TAILSCALE_DEVICE)=' }
+        $nodePort = if ($env:MEDCHAIN_PORT) { $Port } else {
+            (Select-String -Path $envFile -Pattern '^NODE_PORT=(\d+)$' | Select-Object -First 1).Matches[0].Groups[1].Value }
+        $Port = $nodePort
+        $lines = @($keep) + @("NODE_PORT=$nodePort", "ADVERTISE_ADDR=${tsIp}:$nodePort", "MEDCHAIN_HOST_NAME=$env:MEDCHAIN_HOST_NAME",
             "MEDCHAIN_HOST_OS=$env:MEDCHAIN_HOST_OS", "MEDCHAIN_HOST_BOOTED_AT=$env:MEDCHAIN_HOST_BOOTED_AT",
             "MEDCHAIN_TAILSCALE_DEVICE=$env:MEDCHAIN_TAILSCALE_DEVICE")
         [System.IO.File]::WriteAllLines($envFile, $lines)  # no BOM: Docker Compose reads it
     } else {
         Say ""
         Say "Enrolling this laptop. The organiser gives you a join code (it works once, for 30 minutes)."
-        $name = if ($env:MEDCHAIN_DISPLAY_NAME) { $env:MEDCHAIN_DISPLAY_NAME } else { "" }
+        # unattended (the name given in MEDCHAIN_DISPLAY_NAME): never fall back to asking, as install.sh
+        $unattended = [bool]$env:MEDCHAIN_DISPLAY_NAME
+        $name = if ($env:MEDCHAIN_DISPLAY_NAME) { [string]$env:MEDCHAIN_DISPLAY_NAME } else { "" }
         $joinCode = if ($env:MEDCHAIN_JOIN_CODE) { $env:MEDCHAIN_JOIN_CODE } else { "" }
         for ($try = 1; $try -le 3; $try++) {
             while ($name.Trim().Length -lt 2 -or $name.Trim().Length -gt 60) {
-                $name = Read-Host "Your hospital's name, as the dashboard should show it (2 to 60 characters)"
+                $typed = Read-Host "Your hospital's name, as the dashboard should show it (2 to 60 characters)"
+                if ($null -eq $typed) {  # no one to ask (no input at all)
+                    Problem "No hospital name given." "Run it in a PowerShell window and type the name, or set `$env:MEDCHAIN_DISPLAY_NAME."
+                    return
+                }
+                $name = [string]$typed
             }
             if (-not $joinCode) {
                 $secure = Read-Host "The join code (like ABCD-EFGH-JKMN-PQRS-TVWX; hidden as you type)" -AsSecureString
+                if ($null -eq $secure -or $secure.Length -eq 0) {
+                    Problem "No join code given." "Ask the organiser for a join code and type it when asked, or set `$env:MEDCHAIN_JOIN_CODE."
+                    return
+                }
                 $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
                 try { $joinCode = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
                 finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
@@ -178,7 +195,13 @@ function Install-MedChain {
             $code = $LASTEXITCODE
             Remove-Item Env:MEDCHAIN_JOIN_CODE -ErrorAction SilentlyContinue
             if ($code -eq 0) { $enrolled = $true; $joinCode = ""; break }
-            if ($code -eq 3) { Say "That name is taken: choose another one (the same join code still works)."; $name = ""; continue }
+            if ($code -eq 3) {
+                if ($unattended) {
+                    Problem "That name is taken." "Set `$env:MEDCHAIN_DISPLAY_NAME to a name no other hospital uses, then run the same command again (the same join code still works)."
+                    return
+                }
+                Say "That name is taken: choose another one (the same join code still works)."; $name = ""; continue
+            }
             Problem "Enrollment failed (the reason is just above)." "If the code expired, was used or was mistyped, ask the organiser for a new join code, then run the same command again."
             return
         }
@@ -193,7 +216,7 @@ function Install-MedChain {
     $compose = [IO.Path]::Combine($Dir, "deploy", "node.yml")
     docker compose --project-directory $Dir -f $compose up -d
     if ($LASTEXITCODE -ne 0) {
-        Problem "Docker could not start the hospital." "If it says 'port is already allocated', another program uses port ${Port}: close it, or set `$env:MEDCHAIN_PORT to another port and ask the organiser for a new join code. Otherwise restart Docker Desktop and run this again."
+        Problem "Docker could not start the hospital." "If it says 'port is already allocated', another program uses port ${Port}: close it, or set `$env:MEDCHAIN_PORT to another port and run the same command again (no new join code needed). Otherwise restart Docker Desktop and run this again."
         return
     }
     $id = (Select-String -Path $envFile -Pattern '^NODE_ID=(.+)$' | Select-Object -First 1).Matches[0].Groups[1].Value

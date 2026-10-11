@@ -38,16 +38,25 @@ test("the admin account needs a sensible username and a 10-72 character password
   assert.match(checkNewPassword("admin", "x".repeat(73)), /72/);
 });
 
-// admin_users as Postgres would hold it, for the queries Auth sends
+// admin_users (at most one row: its one_admin column is unique) and admin_sessions, as Postgres would hold them
 function fakePool() {
   const users = new Map();
+  const sessions = new Set(["an-old-session"]);
   return {
     users,
+    sessions,
     async query(sql, params = []) {
       if (sql.includes("INSERT INTO admin_users")) {
-        if (users.size) return { rowCount: 0, rows: [] };
+        users.clear(); // ON CONFLICT (one_admin) DO UPDATE: the one row becomes this one
         users.set(params[0], params[1]);
         return { rowCount: 1, rows: [] };
+      }
+      if (sql.includes("DELETE FROM admin_sessions")) {
+        sessions.clear();
+        return { rowCount: 0, rows: [] };
+      }
+      if (sql.includes("SELECT username, password_hash")) {
+        return { rows: [...users].map(([username, password_hash]) => ({ username, password_hash })) };
       }
       if (sql.includes("count(*)")) return { rows: [{ n: users.size }] };
       return { rowCount: 0, rows: [] };
@@ -62,4 +71,19 @@ test("the admin account comes only from DASHBOARD_ADMIN_PASSWORD: unset, there i
   const set = new Auth(pool, { adminUser: "admin", adminPassword: "a-long-enough-password" });
   assert.equal(await set.accountExists(), true);
   assert.deepEqual([...pool.users.keys()], ["admin"]);
+});
+
+test("a changed DASHBOARD_ADMIN_PASSWORD replaces the old one and ends every session; an unchanged one keeps them", async () => {
+  const pool = fakePool();
+  await new Auth(pool, { adminUser: "admin", adminPassword: "the-first-password" }).init();
+  const first = pool.users.get("admin");
+  pool.sessions.add("logged-in");
+  await new Auth(pool, { adminUser: "admin", adminPassword: "the-first-password" }).init();
+  assert.equal(pool.users.get("admin"), first, "a restart with the same password changes nothing");
+  assert.ok(pool.sessions.has("logged-in"));
+  await new Auth(pool, { adminUser: "admin", adminPassword: "a-new-better-password" }).init();
+  assert.notEqual(pool.users.get("admin"), first);
+  assert.equal(pool.sessions.size, 0, "everyone logged in with the old password is logged out");
+  await new Auth(pool, { adminUser: "organiser", adminPassword: "a-new-better-password" }).init();
+  assert.deepEqual([...pool.users.keys()], ["organiser"], "still exactly one account");
 });

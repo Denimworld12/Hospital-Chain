@@ -172,6 +172,12 @@ async function adminRoute(req, res, url, user) {
     });
     return send(res, out.status, out.body);
   }
+  // the organiser takes a hospital out on its behalf (its laptop is off or gone) and frees an enrolled one's name
+  const m = url.pathname.match(/^\/api\/admin\/members\/([a-z0-9][a-z0-9_-]{0,63})\/remove$/);
+  if (m && req.method === "POST") {
+    const out = await directoryAdmin("POST", `/members/${m[1]}/remove`, { removed_by: user });
+    return send(res, out.status, out.body);
+  }
   const r = url.pathname.match(/^\/api\/admin\/join-codes\/([A-Z0-9]{4})\/revoke$/);
   if (r && req.method === "POST") {
     const out = await directoryAdmin("POST", `/join-codes/${r[1]}/revoke`, { revoked_by: user });

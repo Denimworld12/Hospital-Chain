@@ -1,4 +1,6 @@
-import { SectionHeading } from "../components/ui.jsx";
+import { useState } from "react";
+import { PillButton, SectionHeading } from "../components/ui.jsx";
+import { notAuthorized } from "../auth.js";
 
 // Proof of origin: what each hospital's own machine says about itself, in messages signed with the
 // key that signs its training updates and checked by the observer against the key the directory has
@@ -33,9 +35,34 @@ function Rtts({ rtts, names }) {
   ));
 }
 
+// The organiser takes a hospital out of the chain on its behalf (a laptop that is off or gone cannot leave by
+// itself); its neighbours bridge, and an enrolled hospital's name is freed (directory: /admin/members/<id>/remove).
+async function removeMember(id) {
+  const res = await fetch(`/api/admin/members/${encodeURIComponent(id)}/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  notAuthorized(res);
+  const data = await res.json().catch(() => ({}));
+  return { ok: res.ok, ...data };
+}
+
 export default function Nodes({ snapshot }) {
-  const proofs = snapshot?.proofs || [];
+  const [message, setMessage] = useState("");
+  const chain = snapshot?.topology?.chain || [];
   const names = Object.fromEntries((snapshot?.nodes || []).map((n) => [n.node_id, n.display_name]));
+  // every hospital the dashboard knows, with its newest proof (or none: a node that never sent one is listed too)
+  const byId = Object.fromEntries((snapshot?.proofs || []).map((p) => [p.node_id, p]));
+  const proofs = [...new Set([...chain, ...Object.keys(byId)])].map((id) => byId[id] || {
+    node_id: id, display_name: names[id] || id, status: "none", message: null, seconds_since_proof: null,
+  });
+  const remove = async (id) => {
+    if (!window.confirm(`Take ${names[id] || id} out of the chain? Its neighbours connect to each other instead.`)) return;
+    setMessage("");
+    const out = await removeMember(id);
+    setMessage(out.ok ? `${names[id] || id} is being taken out of the chain.` : out.detail || "Could not remove it.");
+  };
   return (
     <section className="section">
       <div className="page">
@@ -50,6 +77,7 @@ export default function Nodes({ snapshot }) {
           hospital and refuses (and audits) anything else. Host facts come from the install script on that computer;
           round-trip times and uptime are measured live.
         </p>
+        {message && <p className="assess-message" role="status">{message}</p>}
         <div className="journal-wrap">
           <table className="journal" data-testid="proofs">
             <thead>
@@ -63,6 +91,7 @@ export default function Nodes({ snapshot }) {
                 <th>Round trip to neighbours</th>
                 <th className="num">Data rows</th>
                 <th>Last signed message</th>
+                <th>Chain</th>
               </tr>
             </thead>
             <tbody>
@@ -89,13 +118,27 @@ export default function Nodes({ snapshot }) {
                       <Rtts rtts={m.neighbours_rtt_ms} names={names} />
                     </td>
                     <td className="num">{m.data_rows ?? "-"}</td>
-                    <td>{ago(p.seconds_since_proof)}</td>
+                    <td>
+                      {ago(p.seconds_since_proof)}
+                      {Math.abs(m.clock_skew_s || 0) > 60 && (
+                        <div className="bad" title="the hospital's clock differs from the hub's; proofs still count">
+                          clock {m.clock_skew_s > 0 ? "behind" : "ahead"} by {duration(Math.abs(m.clock_skew_s))}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      {chain.includes(p.node_id) ? (
+                        <PillButton variant="secondary" onClick={() => remove(p.node_id)}>Remove</PillButton>
+                      ) : (
+                        "not in the chain"
+                      )}
+                    </td>
                   </tr>
                 );
               })}
               {proofs.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="journal__empty">
+                  <td colSpan={10} className="journal__empty">
                     No signed status message yet. A node sends its first one about 10 seconds after it starts.
                   </td>
                 </tr>

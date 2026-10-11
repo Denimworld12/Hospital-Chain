@@ -729,6 +729,12 @@ id and its keys, never on the name, and an enrolled hospital always appears unde
 name it enrolled with. `hospital-a` ... `hospital-e` stay as they are for `make up`
 and the kits.
 
+The organiser can take a hospital out on its behalf (`POST /admin/members/<id>/remove`,
+the **Remove** button on **NODES**): a laptop that is off cannot call `/leave` itself, and
+until it is out, the hospitals beyond it never start a run (the control strip flags such
+a run as incomplete). An enrolled hospital is forgotten at the same time, which also
+frees the name of an install that never finished.
+
 Every attempt is in the audit log (`enrolled`, `enroll_rejected`,
 `join_code_created`, `join_code_revoked`). An enrolled hospital may only register
 with the keys it enrolled with. Its observer token only writes rows as that hospital;
@@ -750,8 +756,11 @@ count only). It also carries a per-start boot id and a rising sequence number.
 The observer checks the signature against the key the directory has on record for that
 hospital (`hospital_keys`, written by the directory when the hospital registers or
 enrolls). It refuses a message that does not verify, comes from a hospital with no key
-on record, is a replay or is more than 10 minutes old, and writes each refusal to the
-audit log (`proof_rejected`). A caller without that hospital's observer token (or the
+on record or is a replay, and writes each refusal to the
+audit log (`proof_rejected`, at most once per hospital and reason every 5 minutes).
+Freshness is judged by arrival order (the boot id and sequence), not by the sender's
+clock, which on a laptop's Docker VM drifts after sleep; the page shows the clock skew
+when it exceeds a minute. A caller without that hospital's observer token (or the
 network's) is refused before any of this and only logged, so it cannot mark someone
 else's hospital rejected. The dashboard's **Nodes** page shows each hospital's facts
 with a **Signature verified** badge and the key's fingerprint, or **Rejected** with the

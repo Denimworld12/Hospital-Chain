@@ -154,6 +154,11 @@ class Store:
             self._conn.execute(f"INSERT INTO enrolled ({', '.join(ENROLLED_COLUMNS)}) VALUES "
                                f"({', '.join('?' for _ in ENROLLED_COLUMNS)})", [row[c] for c in ENROLLED_COLUMNS])
 
+    def remove_enrolled(self, node_id: str) -> bool:
+        """Forget an enrolled hospital: its credential stops working and its display name is free again."""
+        with self._lock:
+            return self._conn.execute("DELETE FROM enrolled WHERE node_id = ?", (node_id,)).rowcount == 1
+
     def enrolled(self) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(f"SELECT {', '.join(ENROLLED_COLUMNS)} FROM enrolled ORDER BY enrolled_at").fetchall()

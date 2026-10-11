@@ -28,7 +28,10 @@ DIRECTORY_PORT=8100
 NEED_GB=5
 
 ok() { printf '  [ok] %s\n' "$1"; }
+CREATED_DIR=""
 problem() {
+  # a folder this run created and left empty goes again, so "nothing has been changed" stays true
+  [ -n "$CREATED_DIR" ] && rmdir "$DIR" 2>/dev/null
   printf '\n  [!] %s\n      What to do: %s\n\n  Fix that, then run the same command again. Nothing has been changed on this computer.\n' "$1" "$2" >&2
   exit 1
 }
@@ -74,6 +77,7 @@ curl -sk --max-time 6 "https://$HUB_HOST:$HUB_PORT/health" 2>/dev/null | grep -q
 ok "The hub at $HUB_HOST:$HUB_PORT answers"
 
 # ---- 4. Disk space -----------------------------------------------------------------------------
+[ -d "$DIR" ] || CREATED_DIR=1
 mkdir -p "$DIR" || problem "Cannot create $DIR." "Set MEDCHAIN_DIR to a folder you can write to."
 FREE_KB=$(df -Pk "$DIR" | awk 'NR==2 {print $4}')
 [ "${FREE_KB:-0}" -ge $((NEED_GB * 1024 * 1024)) ] ||
@@ -112,11 +116,13 @@ USER_FLAG=()
 [ "$(uname)" = Linux ] && USER_FLAG=(--user "$(id -u):$(id -g)")  # the kit's files belong to you, not root
 if [ -n "$NODE_ID" ] && [ -f "$DIR/pki/$NODE_ID/tls.crt" ]; then
   ok "This computer is already enrolled ($NODE_ID); keeping its keys"
-  NODE_PORT=$(sed -n 's/^NODE_PORT=//p' "$ENV_FILE" | head -n 1)
-  # refresh what can change: this computer's Tailscale address and its facts
-  { grep -Ev '^(ADVERTISE_ADDR|MEDCHAIN_HOST_NAME|MEDCHAIN_HOST_OS|MEDCHAIN_HOST_BOOTED_AT|MEDCHAIN_TAILSCALE_DEVICE)=' "$ENV_FILE"
-    printf 'ADVERTISE_ADDR=%s:%s\nMEDCHAIN_HOST_NAME=%s\nMEDCHAIN_HOST_OS=%s\nMEDCHAIN_HOST_BOOTED_AT=%s\nMEDCHAIN_TAILSCALE_DEVICE=%s\n' \
-      "$TS_IP" "$NODE_PORT" "$MEDCHAIN_HOST_NAME" "$MEDCHAIN_HOST_OS" "$MEDCHAIN_HOST_BOOTED_AT" "$MEDCHAIN_TAILSCALE_DEVICE"
+  # refresh what can change: this computer's Tailscale address, its facts, and its port when MEDCHAIN_PORT asks
+  # for another one (peers pin the key, not the address: no new join code is needed)
+  NODE_PORT=${MEDCHAIN_PORT:-$(sed -n 's/^NODE_PORT=//p' "$ENV_FILE" | head -n 1)}
+  PORT=$NODE_PORT
+  { grep -Ev '^(NODE_PORT|ADVERTISE_ADDR|MEDCHAIN_HOST_NAME|MEDCHAIN_HOST_OS|MEDCHAIN_HOST_BOOTED_AT|MEDCHAIN_TAILSCALE_DEVICE)=' "$ENV_FILE"
+    printf 'NODE_PORT=%s\nADVERTISE_ADDR=%s:%s\nMEDCHAIN_HOST_NAME=%s\nMEDCHAIN_HOST_OS=%s\nMEDCHAIN_HOST_BOOTED_AT=%s\nMEDCHAIN_TAILSCALE_DEVICE=%s\n' \
+      "$NODE_PORT" "$TS_IP" "$NODE_PORT" "$MEDCHAIN_HOST_NAME" "$MEDCHAIN_HOST_OS" "$MEDCHAIN_HOST_BOOTED_AT" "$MEDCHAIN_TAILSCALE_DEVICE"
   } >"$ENV_FILE.new" && mv "$ENV_FILE.new" "$ENV_FILE"
 else
   printf '\nEnrolling this computer. The organiser gives you a join code (it works once, for 30 minutes).\n'
@@ -158,7 +164,7 @@ fi
 printf '\n'
 docker compose --project-directory "$DIR" -f "$DIR/deploy/node.yml" up -d ||
   problem "Docker could not start the hospital." \
-          "If it says 'port is already allocated', another program uses port $PORT: stop it. Otherwise restart Docker and run this again."
+          "If it says 'port is already allocated', another program uses port $PORT: stop it, or set MEDCHAIN_PORT to another port and run the same command again (no new join code needed). Otherwise restart Docker and run this again."
 UP="docker compose --project-directory \"$DIR\" -f \"$DIR/deploy/node.yml\""
 printf '\nDone. This computer is running hospital %s.\n' "$NODE_ID"
 printf '  - Keep it plugged in and awake, with Docker and Tailscale running.\n'

@@ -81,7 +81,7 @@ class Batch(BaseModel):
 
 OWNER_CACHE_S = 30.0
 PROOF_MAX_BYTES = 16 * 1024
-PROOF_MAX_SKEW_S = 600  # a message older (or newer) than this is refused, whatever the laptops' clocks say
+PROOF_AUDIT_EVERY_S = 300  # one audit row per hospital and reason in this window (a refused node retries every 10 s)
 
 
 # the field that says whose write an item is: the node that sent the update for update_sent, else node_id
@@ -137,6 +137,7 @@ def create_app(settings: ObserverSettings | None = None, database: Database | No
         return owner
 
     last_seen: dict[str, tuple[str, int]] = {}  # node -> (boot id, seq) of its last accepted proof
+    audited: dict[tuple[str, str], float] = {}  # (node, reason) -> when that refusal was last audited
 
     def check_proof(sender: str, body: bytes, headers) -> tuple[dict, str]:
         """The verified message and the fingerprint of the key that signed it (raises ValueError with why not)."""
@@ -147,8 +148,9 @@ def create_app(settings: ObserverSettings | None = None, database: Database | No
             msg = proof.verify(rows[0][0], body, headers)
         except security.SignatureError as exc:
             raise ValueError(f"signature: {exc} with {sender}'s key on record") from exc
-        if abs(time.time() - float(msg.get("sent_at", 0))) > PROOF_MAX_SKEW_S:
-            raise ValueError("the message is more than 10 minutes old (or from the future)")
+        # freshness is judged by arrival (the boot id and sequence below), never by the sender's clock: a laptop's
+        # Docker VM clock drifts after sleep. The skew is only shown.
+        msg["clock_skew_s"] = round(time.time() - float(msg.get("sent_at", 0)))
         boot, seq = str(msg.get("boot_id")), int(msg.get("seq", 0))
         prev = last_seen.get(sender)
         if prev and prev[0] == boot and seq <= prev[1]:
@@ -195,8 +197,13 @@ def create_app(settings: ObserverSettings | None = None, database: Database | No
 
         def audit_refusal(reason: str) -> None:
             log.warning("proof from %s rejected: %s", sender, reason)
-            db.audit(node_id=sender, event="proof_rejected", sender=sender,
-                     detail={"reason": reason, "client": request.client.host if request.client else None})
+            now = time.monotonic()
+            if now - audited.get((sender, reason), -PROOF_AUDIT_EVERY_S) >= PROOF_AUDIT_EVERY_S:
+                if len(audited) > 1024:
+                    audited.clear()
+                audited[(sender, reason)] = now
+                db.audit(node_id=sender, event="proof_rejected", sender=sender,
+                         detail={"reason": reason, "client": request.client.host if request.client else None})
             if db.fetch("SELECT 1 FROM hospital_keys WHERE node_id = %s", (sender,)):
                 db.proof_rejected(node_id=sender, reason=reason)
 

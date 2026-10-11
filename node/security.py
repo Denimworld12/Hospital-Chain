@@ -36,6 +36,9 @@ _UNSIGNED = {H_SIGNATURE.lower(), "x-medchain-secret"}  # the signature itself; 
 
 
 CERT_VALID_DAYS = 3650
+# certificates start a day early, so a peer whose clock runs slow (a laptop's Docker VM after sleep) still accepts
+# one that was issued a moment ago
+BACKDATE = dt.timedelta(days=1)
 
 
 class SignatureError(Exception):
@@ -111,7 +114,7 @@ def issue_certificate(ca_cert: x509.Certificate, ca_key, public_key, name: str, 
     return (x509.CertificateBuilder()
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))
             .issuer_name(ca_cert.subject).public_key(public_key).serial_number(x509.random_serial_number())
-            .not_valid_before(now - dt.timedelta(minutes=5)).not_valid_after(now + dt.timedelta(days=days))
+            .not_valid_before(now - BACKDATE).not_valid_after(now + dt.timedelta(days=days))
             .add_extension(x509.SubjectAlternativeName([san(h) for h in dict.fromkeys(hosts)]), critical=False)
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]),
