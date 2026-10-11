@@ -751,7 +751,9 @@ The observer checks the signature against the key the directory has on record fo
 hospital (`hospital_keys`, written by the directory when the hospital registers or
 enrolls). It refuses a message that does not verify, comes from a hospital with no key
 on record, is a replay or is more than 10 minutes old, and writes each refusal to the
-audit log (`proof_rejected`). The dashboard's **Nodes** page shows each hospital's facts
+audit log (`proof_rejected`). A caller without that hospital's observer token (or the
+network's) is refused before any of this and only logged, so it cannot mark someone
+else's hospital rejected. The dashboard's **Nodes** page shows each hospital's facts
 with a **Signature verified** badge and the key's fingerprint, or **Rejected** with the
 reason. This is in addition to the Start/Pause controls. One limit: the host's uptime
 counts from the boot time the install script saw, so after a reboot, run the installer
