@@ -2,9 +2,8 @@
 // (the built UI and /api/auth/*) needs a session: the snapshot WebSocket, Start / Pause, the risk
 // assessment relay and the admin pages.
 //
-// - One admin account, created on first run: from DASHBOARD_ADMIN_PASSWORD if it is set, else by
-//   whoever opens the dashboard first (the setup screen, offered only while no account exists).
-//   The password is stored as a bcrypt hash (cost 12), never in the clear.
+// - One admin account, created on first run from DASHBOARD_ADMIN_PASSWORD (compose maps
+//   MEDCHAIN_ADMIN_PASSWORD to it). Unset, there is no account and the login screen says so. The password is stored as a bcrypt hash (cost 12), never in the clear.
 // - A session is a random 32-byte token in an httpOnly, SameSite=Strict cookie; Postgres keeps only
 //   its SHA-256 and expiry (SESSION_HOURS, default 12). Logout deletes it.
 // - Five failed logins from one address lock that address out for 5 minutes.
@@ -118,24 +117,10 @@ export class Auth {
     return this.ready;
   }
 
-  async setupRequired() {
+  async accountExists() {
     await this.init();
     const { rows } = await this.pool.query(`SELECT count(*)::int AS n FROM admin_users`);
-    return rows[0].n === 0;
-  }
-
-  // First run only: the one account. Refused once any account exists (the table holds at most one).
-  async setup(username, password) {
-    await this.init();
-    const problem = checkNewPassword(username, password);
-    if (problem) return { ok: false, status: 400, detail: problem };
-    const hash = await bcrypt.hash(password, BCRYPT_COST);
-    const { rowCount } = await this.pool.query(
-      `INSERT INTO admin_users (username, password_hash) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-      [username, hash],
-    );
-    if (!rowCount) return { ok: false, status: 409, detail: "The admin account already exists: log in instead." };
-    return { ok: true, ...(await this.newSession(username)) };
+    return rows[0].n > 0;
   }
 
   async login(username, password, who) {

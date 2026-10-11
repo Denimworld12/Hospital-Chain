@@ -368,6 +368,9 @@ def hub_env(kit: Path, directory_url: str, observer_url: str, secret: str, image
         # The dashboard, on this laptop only: http://localhost:8080
         DASHBOARD_BIND_IP=127.0.0.1
         DASHBOARD_PORT=8080
+        # The dashboard's admin password (user admin, at least 10 characters): without it nobody can log in.
+        # Restart the dashboard after setting it.
+        MEDCHAIN_ADMIN_PASSWORD=
 
         # ======== Tailscale (the normal way) ========
         # Listen for the hospitals on this laptop's Tailscale IP only. 0.0.0.0 (every interface) also works.

@@ -202,10 +202,11 @@ def create_app(settings: ObserverSettings | None = None, database: Database | No
 
         try:
             await authorize(request, sender)
-            msg, fingerprint = await asyncio.to_thread(check_proof, sender, body, request.headers)
         except HTTPException as exc:
-            await asyncio.to_thread(audit_refusal, f"token: {exc.detail}")
+            log.warning("proof naming %s refused: %s", sender, exc.detail)
             raise
+        try:
+            msg, fingerprint = await asyncio.to_thread(check_proof, sender, body, request.headers)
         except (ValueError, TypeError) as exc:
             await asyncio.to_thread(audit_refusal, str(exc))
             raise HTTPException(403, detail=str(exc))

@@ -277,8 +277,8 @@ to hit. "Preflight says" is the text after `unreachable`; "logs say" is from the
 
 **Join codes (the quick way).** Start the hub (`make hub`, step 2 below; the hub kit
 from `provision.py` is still how the hub gets its keys), open the dashboard and log in
-(the first visit creates the admin account, or set `MEDCHAIN_ADMIN_PASSWORD` in
-`hub.env` first). On **JOIN CODES**, press **Create a join code**: it is shown once.
+as `admin` (set `MEDCHAIN_ADMIN_PASSWORD`, at least 10 characters, in `hub.env`
+first: without it nobody can log in). On **JOIN CODES**, press **Create a join code**: it is shown once.
 Give it to one friend with the install command the page shows (it has your hub's
 address, `HUB_ADDRESS` in `hub.env`, in it). Each code works once and expires (30
 minutes by default); **Revoke** cancels one. Nobody types or receives the network

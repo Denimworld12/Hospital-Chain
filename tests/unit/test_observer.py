@@ -173,6 +173,7 @@ def test_an_enrolled_hospitals_own_token_writes_only_as_that_hospital(tmp_path):
 
 
 def test_proof_of_origin_is_accepted_only_with_the_hospitals_key_on_record(tmp_path):
+    import hashlib
     import json
 
     from chain_harness import free_ports, issue_pki
@@ -182,7 +183,9 @@ def test_proof_of_origin_is_accepted_only_with_the_hospitals_key_on_record(tmp_p
     pki.ensure_identity(pki_dir, "observer", ["127.0.0.1", "localhost"], credential=False)
     key_a = security.load_signing_key(pki_dir / "hospital-a" / "signing.key")
     key_b = security.load_signing_key(pki_dir / "hospital-b" / "signing.key")
-    db = KeysDatabase({}, {"hospital-a": security.public_key_b64(key_a)})
+    other = "node-1-own-token"
+    db = KeysDatabase({hashlib.sha256(other.encode()).hexdigest(): "node-1"},
+                      {"hospital-a": security.public_key_b64(key_a)})
     (port,) = free_ports(1)
     observer = ObserverServer(port, pki_dir, db).start()
     try:
@@ -193,7 +196,13 @@ def test_proof_of_origin_is_accepted_only_with_the_hospitals_key_on_record(tmp_p
             return httpx.post(url, content=body, headers={**headers, **auth}, verify=ca, timeout=5)
 
         prover = proof.Prover("hospital-a", key_a, 303, "v1.1.0")
+        # naming a hospital without its token (none, a wrong one, another hospital's) is refused, and
+        # shows nothing against the hospital it names
         body, headers = prover.message({"hospital-b": 4.2})
+        for token, status in ((None, 401), ("nope", 401), (other, 403)):
+            spoof = {"Authorization": f"Bearer {token}"} if token else {}
+            assert httpx.post(url, content=body, headers={**headers, **spoof}, verify=ca, timeout=5).status_code == status
+        assert not db.rejections and not db.events("proof_rejected")
         r = post(body, headers)
         assert r.status_code == 200 and r.json()["verified"], r.text
         msg = db.proofs[-1]["message"]

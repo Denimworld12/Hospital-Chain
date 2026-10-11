@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
-// The admin's session (server/auth.js): "loading", "setup" (first run: no account yet), "login" or "in".
+// The admin's session (server/auth.js): "loading", "no-account" (DASHBOARD_ADMIN_PASSWORD was never
+// set), "login" or "in".
 // Any request that comes back 401 fires UNAUTHORIZED, and the gate shows the login screen again.
 export const UNAUTHORIZED = "medchain:unauthorized";
 
@@ -26,7 +27,7 @@ export function useAuth() {
     try {
       const res = await fetch("/api/auth/me");
       const me = await res.json();
-      setState({ status: me.authenticated ? "in" : me.setup_required ? "setup" : "login", username: me.username, error: "" });
+      setState({ status: me.authenticated ? "in" : me.account_exists ? "login" : "no-account", username: me.username, error: "" });
     } catch {
       setState((s) => ({ ...s, status: s.status === "loading" ? "login" : s.status, error: "Could not reach the dashboard server." }));
     }
@@ -47,7 +48,6 @@ export function useAuth() {
   return {
     ...state,
     login: (u, p) => submit("login", u, p),
-    setup: (u, p) => submit("setup", u, p),
     logout: async () => {
       await post("logout");
       setState({ status: "login", username: null, error: "" });

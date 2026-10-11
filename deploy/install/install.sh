@@ -139,9 +139,10 @@ else
       ${ALSO[@]+"${ALSO[@]}"} --port "$PORT" --out /kit --image-version "$VERSION" --image "$IMAGE"
     code=$?
     unset MEDCHAIN_JOIN_CODE
-    [ -t 0 ] || [ -r /dev/tty ] || break  # unattended: no one to ask for another name
     if [ $code -eq 0 ]; then enrolled=1; break; fi
     if [ $code -eq 3 ]; then
+      [ -t 0 ] || [ -r /dev/tty ] || problem "That name is taken." \
+        "Set MEDCHAIN_DISPLAY_NAME to a name no other hospital uses, then run the same command again."
       printf 'That name is taken: choose another one (the same join code still works).\n'
       NAME=""
       continue

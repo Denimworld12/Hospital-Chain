@@ -223,11 +223,10 @@ curl --cacert .pki/ca.crt https://localhost:8002/metrics
 
 Open <http://localhost:8080> in a browser and log in. The dashboard has one admin
 account and shows nothing, not even the live snapshot, to anyone without its session
-(`dashboard/server/auth.js`). The account is created on first run:
-
-- from `MEDCHAIN_ADMIN_PASSWORD` (user `admin`) if you set it before `make up` / `make hub`;
-- otherwise the first person to open the dashboard is asked to create it (pick the
-  username and a password of at least 10 characters).
+(`dashboard/server/auth.js`). The account (user `admin`) is created on first run from
+`MEDCHAIN_ADMIN_PASSWORD` (at least 10 characters): set it before `make up`, or in
+`hub.env` for `make hub`. Without it nobody can log in, and the login screen says to
+set it and restart the dashboard.
 
 The password is stored as a bcrypt hash. The session is an httpOnly, SameSite=Strict
 cookie (12 hours; **LOG OUT** in the top bar ends it), and Postgres keeps only its

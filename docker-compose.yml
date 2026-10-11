@@ -222,7 +222,7 @@ services:
       MEDCHAIN_SHARED_SECRET: ${MEDCHAIN_SHARED_SECRET:-medchain-demo-secret}
       # the relay reaches the nodes over HTTPS: trust the network CA
       NODE_EXTRA_CA_CERTS: /pki/ca.crt
-      # the one admin account (dashboard/server/auth.js): unset, the first visitor creates it
+      # the one admin account (dashboard/server/auth.js), user admin: unset, nobody can log in
       DASHBOARD_ADMIN_PASSWORD: ${MEDCHAIN_ADMIN_PASSWORD:-}
       # the admin page's join codes, with the admin token the directory writes to hub-secrets
       DIRECTORY_ADMIN_URL: https://directory:8100

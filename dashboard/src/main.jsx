@@ -17,7 +17,7 @@ import { useAuth } from "./auth.js";
 function Gate() {
   const auth = useAuth();
   if (auth.status === "loading") return null;
-  if (auth.status !== "in") return <Login mode={auth.status} error={auth.error} onLogin={auth.login} onSetup={auth.setup} />;
+  if (auth.status !== "in") return <Login mode={auth.status} error={auth.error} onLogin={auth.login} />;
   return <App username={auth.username} onLogout={auth.logout} />;
 }
 

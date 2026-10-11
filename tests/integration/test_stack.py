@@ -236,7 +236,7 @@ def test_the_dashboard_needs_the_admins_login():
     with pytest.raises(InvalidStatus):
         connect(DASHBOARD.replace("http", "ws", 1) + "/ws", open_timeout=5)
     me = httpx.get(f"{DASHBOARD}/api/auth/me", timeout=5).json()
-    assert me == {"authenticated": False, "username": None, "setup_required": False}
+    assert me == {"authenticated": False, "username": None, "account_exists": True}
     bad = httpx.post(f"{DASHBOARD}/api/auth/login", json={"username": "admin", "password": "wrong"}, timeout=10)
     assert bad.status_code == 401 and "medchain_session" not in bad.cookies
     cross = httpx.post(f"{DASHBOARD}/api/auth/login", json={"username": "admin", "password": ADMIN_PASSWORD},

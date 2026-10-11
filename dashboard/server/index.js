@@ -137,12 +137,12 @@ function serveStatic(req, res) {
   fs.createReadStream(file).pipe(res);
 }
 
-// /api/auth/*: who is logged in, the first-run setup, login and logout.
+// /api/auth/*: who is logged in (and whether the admin account exists), login and logout.
 async function authRoute(req, res, action) {
   const cookie = (token, maxAge) => ({ "Set-Cookie": sessionCookie(token, { secure: !!req.socket.encrypted, maxAge }) });
   if (action === "me" && req.method === "GET") {
     const user = await auth.user(req);
-    return send(res, 200, { authenticated: !!user, username: user, setup_required: !user && (await auth.setupRequired()) });
+    return send(res, 200, { authenticated: !!user, username: user, account_exists: !!user || (await auth.accountExists()) });
   }
   if (req.method !== "POST") return send(res, 405, { detail: "method not allowed" });
   if (action === "logout") {
@@ -150,8 +150,7 @@ async function authRoute(req, res, action) {
     return send(res, 200, { authenticated: false }, "application/json", cookie("", 0));
   }
   const body = await readJson(req);
-  const out = action === "setup" ? await auth.setup(body.username, body.password)
-    : action === "login" ? await auth.login(body.username, body.password, req.socket.remoteAddress)
+  const out = action === "login" ? await auth.login(body.username, body.password, req.socket.remoteAddress)
     : { ok: false, status: 404, detail: "not found" };
   if (!out.ok) return send(res, out.status, { detail: out.detail });
   return send(res, 200, { authenticated: true, username: out.username }, "application/json", cookie(out.token));
