@@ -16,19 +16,18 @@ leave while training keeps going, and a live dashboard shows every update as it
 crosses the network.
 
 <p align="center">
-  <img src="docs/screenshots/dynamic-join-topology.png" alt="MedChain dashboard, network topology page: five hospitals in chain order, each alive, with model updates travelling between neighbours" width="860">
+  <img src="docs/screenshots/join-code-topology.png" alt="MedChain dashboard, network topology page: four hospitals in a chain, all alive, the fourth (Leeds General) enrolled with a join code" width="860">
 </p>
 
-<p align="center"><i>The real dashboard during a Q-GADMM run, right after a fifth hospital joined the chain
-(<a href="#a-hospital-joins-another-leaves-live">more screenshots</a>). Captured when the demo stack started four
-hospitals; today it starts three and a fourth joins. It predates the dashboard login, join codes and the
-<b>NODES</b> proof-of-origin page.</i></p>
+<p align="center"><i>The real dashboard after a Q-GADMM run on the demo stack: Hospitals A, B and C, plus
+Leeds General, which joined with a one-time join code. The run reached consensus at round 96
+(<a href="#what-it-looks-like">more screenshots</a>).</i></p>
 
 ## Contents
 
+- [Quick start](#quick-start)
 - [Overview](#overview)
 - **Get started**
-  - [Quick start](#quick-start)
   - [What it looks like](#what-it-looks-like)
   - [Requirements](#requirements)
   - [Running it](#running-it)
@@ -55,6 +54,72 @@ hospitals; today it starts three and a fourth joins. It predates the dashboard l
     - [Prove it](#prove-it)
   - [Layout](#layout)
   - [Tests](#tests)
+
+## Quick start
+
+**1. Install what you need.** The installer checks for both and tells you if one is missing.
+
+- **Docker**: [Docker Desktop](https://www.docker.com/products/docker-desktop/) on Windows
+  or Mac, [Docker Engine](https://docs.docker.com/engine/install/) on Linux. Start it and
+  leave it running.
+- **Tailscale**, which connects the laptops to each other: [download it](https://tailscale.com/download),
+  then log in.
+  - **Windows or Mac:** click the Tailscale icon (system tray or menu bar), choose **Log
+    in**, and finish in the browser it opens.
+  - **Linux:** run `sudo tailscale up` and open the link it prints.
+  - Accept the organiser's invite to their tailnet. You are done when `tailscale ip -4`
+    prints an address like `100.x.y.z`.
+
+**2. Join a network** (a hospital's laptop). There is nothing to download or unzip: the
+command fetches everything it needs.
+
+1. Ask the organiser for a **join code** and the **command** shown under it on their
+   dashboard. Their hub address is already filled in.
+2. Open a terminal.
+   - **Windows:** Start menu, type `PowerShell`, press Enter.
+   - **Mac:** open **Terminal**.
+   - **Linux:** open your terminal.
+3. Paste the command and press Enter.
+   - **Windows:**
+
+     ```powershell
+     $env:MEDCHAIN_HUB = "100.x.y.z:8100"; irm https://raw.githubusercontent.com/Denimworld12/Hospital-Chain/v1.1.0/deploy/install/install.ps1 | iex
+     ```
+
+     Running it again on a laptop that already joined can fail with `v1.1.0`
+     ([#11](https://github.com/Denimworld12/Hospital-Chain/issues/11)); see the [workaround](#windows-step-by-step-docker-and-tailscale-only).
+
+   - **Mac or Linux:**
+
+     ```sh
+     curl -fsSL https://raw.githubusercontent.com/Denimworld12/Hospital-Chain/v1.1.0/deploy/install/install.sh | MEDCHAIN_HUB=100.x.y.z bash
+     ```
+
+   It checks Docker, Tailscale, the hub and disk space, then starts the hospital.
+4. Type the hospital's name, then paste the join code.
+5. Wait until it says `Done`: about 5 minutes the first time (a 2 GB download). There is
+   nothing else to set up.
+
+**3. Or run the whole network on one computer** (to try it, or as the organiser).
+
+1. Download the code: [Hospital-Chain-1.1.0.zip](https://github.com/Denimworld12/Hospital-Chain/archive/refs/tags/v1.1.0.zip).
+   Unzip it.
+2. Open a terminal in the unzipped folder.
+   - **Windows:** open the folder, then type `powershell` in the address bar and press Enter.
+   - **Mac:** right-click the folder and choose **New Terminal at Folder**.
+   - **Linux:** right-click inside the folder and choose **Open in Terminal**.
+3. Choose the dashboard's admin password (at least 10 characters). This is the only
+   setting you need.
+   - **Windows:** `$env:MEDCHAIN_ADMIN_PASSWORD = 'choose-at-least-10-characters'`
+   - **Mac or Linux:** `export MEDCHAIN_ADMIN_PASSWORD='choose-at-least-10-characters'`
+4. Start it: `docker compose up -d --build --wait` (or `make up`). This starts three
+   hospitals, the directory, the observer, Postgres and the dashboard.
+5. Open <http://localhost:8080>, log in as `admin` with that password and press **START
+   TRAINING ROUND**. `docker compose down` stops it.
+
+**Next:** [Running it](#running-it) explains each step. [Windows step by step](#windows-step-by-step-docker-and-tailscale-only)
+sets up a hub that hospitals on other laptops join. [Running on separate machines](#running-on-separate-machines)
+and [Provision one kit per hospital](#provision-one-kit-per-hospital) cover the rest.
 
 ## Overview
 
@@ -84,19 +149,6 @@ and trained fresh in this repository. It is an inference tool only. It is not
 part of federated training, and the patients it scores are never stored. Both
 models are trained on public, **non-Indian** datasets (see
 [Risk assessment](#3-assess-a-patient-optional)).
-
-## Quick start
-
-With Docker and Docker Compose v2 installed (see [Requirements](#requirements)):
-
-```sh
-export MEDCHAIN_ADMIN_PASSWORD='choose-at-least-10-characters'
-make up              # three hospitals, the directory, the observer, Postgres and the dashboard
-```
-
-Then open <http://localhost:8080>, log in as `admin` with that password and press
-**START TRAINING ROUND**. [Running it](#running-it) walks through every step, and
-`docker compose down` stops the stack.
 
 ## What it looks like
 
@@ -145,6 +197,15 @@ from five hospitals (four links) to four (three links):
 The same sequence (the starting hospitals, D joining, a middle hospital leaving,
 consensus, and each dashboard page following it) is an automated test against
 the live stack (`tests/integration/test_stack.py`).
+
+### Nodes: proof of origin
+
+The **NODES** page from the same run as the screenshot at the top. Each hospital's signed
+status message is checked against the key the directory has on record. Leeds General
+joined with a join code. The others were started by the compose stack, so they show what
+their containers see.
+
+![Nodes page: four hospitals, each SIGNATURE VERIFIED with its key fingerprint, computer, operating system, uptime, round trip to neighbours and data rows](docs/screenshots/nodes.png)
 
 ### Topology
 
